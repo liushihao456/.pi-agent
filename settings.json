@@ -1,0 +1,22 @@
+{
+  "lastChangelogVersion": "0.79.1",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium",
+  "packages": [
+    "npm:context-mode",
+    "npm:pi-web-access",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@juicesharp/rpiv-todo",
+    "npm:pi-mcp-adapter",
+    "npm:pi-simplify",
+    "npm:pi-markdown-preview",
+    "npm:pi-btw",
+    "npm:@narumitw/pi-codex-usage",
+    "npm:pi-lens",
+    "npm:pi-caveman",
+    "npm:pi-claude-style-tools",
+    "npm:@tifan/pi-fixed-editor",
+    "npm:@asermax/pi-save"
+  ]
+}
