@@ -1,15 +1,16 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
+import {
+	copyToClipboard,
+	type ExtensionAPI,
+	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderFixedEditorCluster } from "./fixed-editor/cluster.ts";
+import { renderFixedEditorCluster } from "./cluster.ts";
 import {
 	emergencyTerminalModeReset,
 	TerminalSplitCompositor,
 	type TerminalLike,
-} from "./fixed-editor/terminal-split.ts";
+} from "./terminal-split.ts";
 
 interface ContainerLike extends Component {
 	children: Component[];
@@ -186,6 +187,7 @@ function install(ctx: ExtensionContext, tui: TuiLike): void {
 		tui,
 		terminal,
 		keyboardScrollShortcuts: { up: "super+pageup", down: "super+pagedown" },
+		onCopySelection: (text) => void copyToClipboard(text),
 		getShowHardwareCursor: () =>
 			typeof tui.getShowHardwareCursor === "function" &&
 			tui.getShowHardwareCursor(),
