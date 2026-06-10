@@ -108,8 +108,10 @@ async function ensureEmacsServer() {
 			// No reachable server. Start daemon below.
 		}
 
+		console.log("[emacs] starting daemon...");
 		await run("emacs", ["--daemon"], { timeoutMs: 15000 });
 		state.startedEmacsServer = true;
+		console.log("[emacs] daemon started");
 	})();
 
 	return state.serverStartPromise;
