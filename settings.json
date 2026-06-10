@@ -17,6 +17,7 @@
     "npm:pi-caveman",
     "npm:pi-claude-style-tools",
     "npm:@tifan/pi-fixed-editor",
-    "npm:@asermax/pi-save"
+    "npm:@asermax/pi-save",
+    "npm:@neilurk12/pi-lazygit"
   ]
 }
