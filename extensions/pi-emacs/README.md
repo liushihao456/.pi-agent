@@ -15,7 +15,7 @@ Pi extension for opening `emacsclient` from Pi's TUI.
 ## Install
 
 ```bash
-pi install npm:pi-emacs
+pi install npm:@liushihao456/pi-emacs
 ```
 
 For local development:
