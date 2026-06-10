@@ -1,0 +1,34 @@
+{
+  "name": "pi-emacs",
+  "version": "0.1.0",
+  "description": "Pi extension that opens emacsclient in a popup terminal and tracks recently edited files.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "emacs",
+    "emacsclient"
+  ],
+  "license": "MIT",
+  "author": "liushihao",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "check": "bun build ./index.ts --target=node --outfile=/tmp/pi-emacs-check.js --external @earendil-works/pi-coding-agent"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

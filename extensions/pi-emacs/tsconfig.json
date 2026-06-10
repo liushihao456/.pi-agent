@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "types": ["node"],
+    "typeRoots": [
+      "/Users/liushihao/.pi/agent/npm/node_modules/@types",
+      "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"
+    ],
+    "paths": {
+      "@earendil-works/pi-coding-agent": [
+        "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent"
+      ],
+      "@earendil-works/pi-coding-agent/*": [
+        "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/*"
+      ]
+    }
+  },
+  "include": ["index.ts", "types.d.ts"]
+}
