@@ -16,6 +16,8 @@
     "npm:pi-caveman",
     "npm:pi-claude-style-tools",
     "npm:@asermax/pi-save",
-    "npm:@neilurk12/pi-lazygit"
+    "npm:@neilurk12/pi-lazygit",
+    "npm:@plannotator/pi-extension",
+    "npm:pi-rtk-optimizer"
   ]
 }
