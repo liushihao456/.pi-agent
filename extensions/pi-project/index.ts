@@ -1,4 +1,10 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
+import {
+	existsSync,
+	readdirSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type {
@@ -29,9 +35,20 @@ type PickerAction =
 	| { type: "new-session"; cwd: string }
 	| { type: "switch-session"; sessionPath: string };
 
+const PENDING_EMPTY_SESSIONS_KEY = Symbol.for(
+	"pi-project.pending-empty-sessions",
+);
+const globalState = globalThis as typeof globalThis & {
+	[PENDING_EMPTY_SESSIONS_KEY]?: Set<string>;
+};
+const pendingEmptySessions =
+	globalState[PENDING_EMPTY_SESSIONS_KEY] ?? new Set<string>();
+globalState[PENDING_EMPTY_SESSIONS_KEY] = pendingEmptySessions;
+
 const MODE_PROJECTS = "projects";
 const MODE_SESSIONS = "sessions";
 const MAX_VISIBLE_ITEMS = 5;
+const FILE_EXPLORER_MAX_VISIBLE = 8;
 type Mode = typeof MODE_PROJECTS | typeof MODE_SESSIONS;
 
 function expandHome(input: string): string {
@@ -47,7 +64,7 @@ function normalizeExistingDir(input: string): string | null {
 		const absolute = path.resolve(expanded);
 		if (!existsSync(absolute)) return null;
 		if (!statSync(absolute).isDirectory()) return null;
-		return realpathSync(absolute);
+		return absolute;
 	} catch {
 		return null;
 	}
@@ -132,6 +149,72 @@ function isPrintable(data: string): boolean {
 	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
+function formatSize(bytes: number): string {
+	if (bytes < 1000) return `${bytes}`;
+	if (bytes < 1_000_000)
+		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}k`;
+	if (bytes < 1_000_000_000)
+		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}M`;
+	return `${(bytes / 1_000_000_000).toFixed(1)}G`;
+}
+
+function modeString(mode: number, isDirectory: boolean): string {
+	const type = isDirectory ? "d" : "-";
+	const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
+		.map((bit, index) => (mode & bit ? "rwx"[index % 3] : "-"))
+		.join("");
+	return `${type}${bits}`;
+}
+
+type FileEntry = {
+	name: string;
+	path: string;
+	isDirectory: boolean;
+	mode: string;
+	size: string;
+	modified: Date;
+};
+
+function readFileEntries(dir: string): FileEntry[] {
+	const entries: FileEntry[] = [];
+	const parent = path.dirname(dir);
+	if (parent !== dir) {
+		entries.push({
+			name: "../",
+			path: parent,
+			isDirectory: true,
+			mode: "drwxr-xr-x",
+			size: "",
+			modified: new Date(),
+		});
+	}
+
+	for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+		try {
+			const entryPath = path.join(dir, dirent.name);
+			const stat = statSync(entryPath);
+			const isDirectory = stat.isDirectory();
+			entries.push({
+				name: `${dirent.name}${isDirectory ? "/" : ""}`,
+				path: entryPath,
+				isDirectory,
+				mode: modeString(stat.mode, isDirectory),
+				size: formatSize(stat.size),
+				modified: stat.mtime,
+			});
+		} catch {
+			// Ignore unreadable entries.
+		}
+	}
+
+	return entries.sort((a, b) => {
+		if (a.name === "../") return -1;
+		if (b.name === "../") return 1;
+		if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+		return a.name.localeCompare(b.name);
+	});
+}
+
 class ProjectSessionPicker {
 	private mode: Mode = MODE_PROJECTS;
 	private selectedProjectIndex = 0;
@@ -148,11 +231,17 @@ class ProjectSessionPicker {
 		theme: Theme,
 		done: (action: PickerAction) => void,
 		requestRender: () => void,
+		initialProject?: ProjectGroup,
 	) {
 		this.projects = projects;
 		this.theme = theme;
 		this.done = done;
 		this.requestRender = requestRender;
+		if (initialProject) {
+			this.mode = MODE_SESSIONS;
+			this.activeProject = initialProject;
+			this.selectedProjectIndex = Math.max(0, projects.indexOf(initialProject));
+		}
 	}
 
 	render(width: number): string[] {
@@ -513,19 +602,332 @@ class ProjectSessionPicker {
 	}
 }
 
+class FileExplorer {
+	private cwd: string;
+	private entries: FileEntry[] = [];
+	private selectedIndex = 0;
+	private search = "";
+	private error: string | undefined;
+	private readonly theme: Theme;
+	private readonly done: (path: string | null) => void;
+	private readonly requestRender: () => void;
+
+	constructor(
+		initialCwd: string,
+		theme: Theme,
+		done: (path: string | null) => void,
+		requestRender: () => void,
+	) {
+		this.cwd = normalizeExistingDir(initialCwd) ?? homedir();
+		this.theme = theme;
+		this.done = done;
+		this.requestRender = requestRender;
+		this.refresh();
+	}
+
+	render(width: number): string[] {
+		const lines: string[] = [];
+		lines.push(this.border(width));
+		lines.push(this.header(width));
+		lines.push(this.border(width, "dim"));
+		this.renderEntries(lines, width);
+		lines.push(this.border(width));
+		lines.push(
+			this.theme.fg(
+				"dim",
+				fits(
+					width,
+					"↑↓/C-p C-n move · tab enter folder · enter choose folder · esc cancel",
+				),
+			),
+		);
+		return lines;
+	}
+
+	invalidate(): void {}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.escape)) {
+			this.done(null);
+			return;
+		}
+		if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
+			this.move(-1);
+			return;
+		}
+		if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
+			this.move(1);
+			return;
+		}
+		if (matchesKey(data, Key.tab)) {
+			this.enterSelectedDirectory();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			this.chooseSelectedDirectory();
+			return;
+		}
+		if (matchesKey(data, Key.backspace)) {
+			this.search = this.search.slice(0, -1);
+			this.clampSelection();
+			this.requestRender();
+			return;
+		}
+		if (isPrintable(data)) {
+			this.search += data;
+			this.clampSelection();
+			this.requestRender();
+		}
+	}
+
+	private refresh(): void {
+		try {
+			this.entries = readFileEntries(this.cwd);
+			this.selectedIndex = Math.max(
+				0,
+				Math.min(this.selectedIndex, Math.max(0, this.entries.length - 1)),
+			);
+			this.error = undefined;
+		} catch (error) {
+			this.entries = [];
+			this.selectedIndex = 0;
+			this.error = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	private header(width: number): string {
+		const entries = this.filteredEntries();
+		const total = Math.max(1, entries.length);
+		const index = Math.min(this.selectedIndex + 1, total);
+		return this.theme.fg(
+			"accent",
+			fits(
+				width,
+				`${index}/${total}  Find file: ${displayPath(this.cwd)}/${this.search}█`,
+			),
+		);
+	}
+
+	private border(width: number, color: "accent" | "dim" = "accent"): string {
+		return this.theme.fg(color, "─".repeat(Math.max(0, width)));
+	}
+
+	private renderEntries(lines: string[], width: number): void {
+		if (this.error) {
+			lines.push(this.theme.fg("dim", indent(width, this.error)));
+			this.padRows(lines, width, 1);
+			return;
+		}
+		const entries = this.filteredEntries();
+		if (entries.length === 0) {
+			lines.push(
+				this.theme.fg(
+					"dim",
+					indent(width, this.search ? "No matches." : "No entries."),
+				),
+			);
+			this.padRows(lines, width, 1);
+			return;
+		}
+
+		let rendered = 0;
+		const start = this.visibleStart(entries.length);
+		const end = Math.min(entries.length, start + FILE_EXPLORER_MAX_VISIBLE);
+		for (let i = start; i < end; i++) {
+			lines.push(
+				this.entryLine(width, entries[i]!, {
+					selected: i === this.selectedIndex,
+				}),
+			);
+			rendered++;
+		}
+		this.padRows(lines, width, rendered);
+	}
+
+	private entryLine(
+		width: number,
+		entry: FileEntry,
+		options: { selected: boolean },
+	): string {
+		const left = `${options.selected ? "›" : " "} ${entry.name}`;
+		const meta = `${entry.mode}  ${entry.size.padStart(5)}  ${relativeTime(entry.modified)}`;
+		const metaWidth = Math.min(38, Math.max(0, Math.floor(width * 0.48)));
+		const renderedMeta = fits(metaWidth, meta);
+		const renderedLeft = fits(
+			Math.max(0, width - visibleWidth(renderedMeta) - 1),
+			left,
+		);
+		const gap = " ".repeat(
+			Math.max(
+				1,
+				width - visibleWidth(renderedLeft) - visibleWidth(renderedMeta),
+			),
+		);
+		const styledLeft = options.selected
+			? this.theme.fg("accent", renderedLeft)
+			: renderedLeft;
+		return `${styledLeft}${gap}${this.theme.fg("dim", renderedMeta)}`;
+	}
+
+	private visibleStart(total: number): number {
+		if (total <= FILE_EXPLORER_MAX_VISIBLE) return 0;
+		const half = Math.floor(FILE_EXPLORER_MAX_VISIBLE / 2);
+		return Math.min(
+			Math.max(0, this.selectedIndex - half),
+			total - FILE_EXPLORER_MAX_VISIBLE,
+		);
+	}
+
+	private padRows(lines: string[], width: number, rendered: number): void {
+		for (let i = rendered; i < FILE_EXPLORER_MAX_VISIBLE; i++) {
+			lines.push(" ".repeat(Math.max(0, width)));
+		}
+	}
+
+	private filteredEntries(): FileEntry[] {
+		const query = safeLower(this.search.trim());
+		if (!query) return this.entries;
+		return this.entries.filter((entry) =>
+			safeLower(entry.name).includes(query),
+		);
+	}
+
+	private clampSelection(): void {
+		const maxIndex = Math.max(0, this.filteredEntries().length - 1);
+		this.selectedIndex = Math.max(0, Math.min(this.selectedIndex, maxIndex));
+	}
+
+	private move(delta: number): void {
+		const entries = this.filteredEntries();
+		if (entries.length === 0) return;
+		this.selectedIndex =
+			(this.selectedIndex + delta + entries.length) % entries.length;
+		this.requestRender();
+	}
+
+	private selected(): FileEntry | undefined {
+		return this.filteredEntries()[this.selectedIndex];
+	}
+
+	private enterSelectedDirectory(): void {
+		const entry = this.selected();
+		if (!entry?.isDirectory) return;
+		const next = normalizeExistingDir(entry.path);
+		if (!next) return;
+		this.cwd = next;
+		this.search = "";
+		this.selectedIndex = 0;
+		this.refresh();
+		this.requestRender();
+	}
+
+	private chooseSelectedDirectory(): void {
+		const entry = this.selected();
+		if (!entry?.isDirectory) return;
+		const chosen = normalizeExistingDir(entry.path);
+		if (chosen) this.done(chosen);
+	}
+}
+
+async function showFolderExplorer(
+	ctx: ExtensionCommandContext,
+	initialCwd: string,
+): Promise<string | null> {
+	if (!ctx.hasUI) return null;
+	return (
+		(await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+			return new FileExplorer(initialCwd, theme, done, () =>
+				tui.requestRender(),
+			);
+		})) ?? null
+	);
+}
+
 async function showPicker(
 	ctx: ExtensionCommandContext,
 	projects: ProjectGroup[],
+	initialProject?: ProjectGroup,
 ): Promise<PickerAction> {
 	if (!ctx.hasUI) return { type: "cancel" };
 	return (
 		(await ctx.ui.custom<PickerAction>((tui, theme, _keybindings, done) => {
-			const picker = new ProjectSessionPicker(projects, theme, done, () =>
-				tui.requestRender(),
+			const picker = new ProjectSessionPicker(
+				projects,
+				theme,
+				done,
+				() => tui.requestRender(),
+				initialProject,
 			);
 			return picker;
 		})) ?? { type: "cancel" }
 	);
+}
+
+function ensureSessionFileExists(
+	sessionManager: SessionManager,
+): string | null {
+	const sessionFile = sessionManager.getSessionFile();
+	const header = sessionManager.getHeader();
+	if (!sessionFile || !header) return null;
+	if (!existsSync(sessionFile)) {
+		writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
+		pendingEmptySessions.add(sessionFile);
+	}
+	return sessionFile;
+}
+
+function entryText(entry: unknown): string {
+	const message = (entry as { message?: { content?: unknown } }).message;
+	const content = message?.content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((part) => (typeof part?.text === "string" ? part.text : ""))
+			.join("\n");
+	}
+	return "";
+}
+
+function isIgnorableSetupEntry(entry: unknown): boolean {
+	const type = (entry as { type?: unknown }).type;
+	return (
+		type === "model_change" ||
+		type === "thinking_level_change" ||
+		type === "custom" ||
+		type === "session_info"
+	);
+}
+
+function isProjectCommandOnlyEntry(entry: unknown): boolean {
+	const type = (entry as { type?: unknown }).type;
+	const role = (entry as { message?: { role?: unknown } }).message?.role;
+	return (
+		type === "message" &&
+		role === "user" &&
+		entryText(entry).trim() === "/project"
+	);
+}
+
+function isEmptyProjectSession(ctx: ExtensionCommandContext): boolean {
+	const entries = ctx.sessionManager.getEntries();
+	return entries.every(
+		(entry) => isIgnorableSetupEntry(entry) || isProjectCommandOnlyEntry(entry),
+	);
+}
+
+function cleanupEmptyProjectSession(ctx: ExtensionCommandContext): void {
+	const sessionFile = ctx.sessionManager.getSessionFile();
+	if (!sessionFile || !pendingEmptySessions.has(sessionFile)) return;
+	if (!isEmptyProjectSession(ctx)) {
+		pendingEmptySessions.delete(sessionFile);
+		return;
+	}
+	pendingEmptySessions.delete(sessionFile);
+	try {
+		if (existsSync(sessionFile)) unlinkSync(sessionFile);
+	} catch {
+		// Best-effort cleanup only.
+	}
 }
 
 async function createAndSwitch(
@@ -533,11 +935,12 @@ async function createAndSwitch(
 	cwd: string,
 ): Promise<void> {
 	const sessionManager = SessionManager.create(cwd);
-	const sessionFile = sessionManager.getSessionFile();
+	const sessionFile = ensureSessionFileExists(sessionManager);
 	if (!sessionFile) {
 		ctx.ui.notify("Could not create persisted session", "error");
 		return;
 	}
+	cleanupEmptyProjectSession(ctx);
 	await ctx.switchSession(sessionFile, {
 		withSession: async (nextCtx) => {
 			nextCtx.ui.notify(`Switched to ${displayPath(cwd)}`, "info");
@@ -545,18 +948,47 @@ async function createAndSwitch(
 	});
 }
 
-async function openFolder(ctx: ExtensionCommandContext): Promise<void> {
-	const input = await ctx.ui.input("Open folder", ctx.cwd || process.cwd());
-	if (input === undefined) return;
-	const cwd = normalizeExistingDir(input);
-	if (!cwd) {
-		ctx.ui.notify("Folder does not exist or is not a directory", "error");
+async function handlePickerAction(
+	ctx: ExtensionCommandContext,
+	action: PickerAction,
+): Promise<void> {
+	if (action.type === "cancel") return;
+	if (action.type === "open-folder") {
+		await openFolder(ctx);
 		return;
 	}
-	await createAndSwitch(ctx, cwd);
+	if (action.type === "new-session") {
+		await createAndSwitch(ctx, action.cwd);
+		return;
+	}
+	if (action.type === "switch-session") {
+		cleanupEmptyProjectSession(ctx);
+		await ctx.switchSession(action.sessionPath, {
+			withSession: async (nextCtx) => {
+				nextCtx.ui.notify("Switched session", "info");
+			},
+		});
+	}
+}
+
+async function openFolder(ctx: ExtensionCommandContext): Promise<void> {
+	const cwd = await showFolderExplorer(ctx, ctx.cwd || process.cwd());
+	if (!cwd) return;
+	const projects = makeProjects(await SessionManager.listAll());
+	const existing = projects.find((project) => project.path === cwd);
+	if (!existing) {
+		await createAndSwitch(ctx, cwd);
+		return;
+	}
+	const action = await showPicker(ctx, projects, existing);
+	await handlePickerAction(ctx, action);
 }
 
 export default function piProject(pi: ExtensionAPI) {
+	pi.on("session_shutdown", (_event, ctx) => {
+		cleanupEmptyProjectSession(ctx as ExtensionCommandContext);
+	});
+
 	pi.registerCommand("project", {
 		description: "Switch project by choosing sessions grouped by cwd",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
@@ -564,23 +996,7 @@ export default function piProject(pi: ExtensionAPI) {
 			const sessions = await SessionManager.listAll();
 			const projects = makeProjects(sessions);
 			const action = await showPicker(ctx, projects);
-
-			if (action.type === "cancel") return;
-			if (action.type === "open-folder") {
-				await openFolder(ctx);
-				return;
-			}
-			if (action.type === "new-session") {
-				await createAndSwitch(ctx, action.cwd);
-				return;
-			}
-			if (action.type === "switch-session") {
-				await ctx.switchSession(action.sessionPath, {
-					withSession: async (nextCtx) => {
-						nextCtx.ui.notify("Switched session", "info");
-					},
-				});
-			}
+			await handlePickerAction(ctx, action);
 		},
 	});
 }
