@@ -125,7 +125,9 @@ export default function piStatus(pi: ExtensionAPI) {
 			requestRender();
 			return;
 		}
-		state.codexUsageLabel = await refreshCodexUsageLabel(ctx, { force });
+		const label = await refreshCodexUsageLabel(ctx, { force });
+		if (state.destroyed) return;
+		state.codexUsageLabel = label;
 		requestRender();
 	}
 

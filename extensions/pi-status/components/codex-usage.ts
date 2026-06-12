@@ -101,7 +101,10 @@ export async function refreshCodexUsageLabel(
 	ctx: ExtensionContext,
 	options: { force?: boolean; timeoutMs?: number } = {},
 ): Promise<string> {
-	if (!isOpenAICodexModel(ctx.model)) return "";
+	// Capture session-bound values before any await. During /reload the old
+	// ExtensionContext becomes stale while this async refresh may still finish.
+	const model = ctx.model;
+	if (!isOpenAICodexModel(model)) return "";
 	if (inFlight) return inFlight;
 
 	inFlight = (async () => {
@@ -109,19 +112,19 @@ export async function refreshCodexUsageLabel(
 			cachedReport && Date.now() - cachedReport.createdAt < 60_000
 				? cachedReport
 				: undefined;
-		if (cached && !options.force)
-			return formatCodexUsage(cached.report, ctx.model);
+		if (cached && !options.force) return formatCodexUsage(cached.report, model);
 
 		try {
 			const report = await queryUsage(
 				ctx,
+				model,
 				options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 			);
 			cachedReport = { createdAt: Date.now(), report };
-			return formatCodexUsage(report, ctx.model);
+			return formatCodexUsage(report, model);
 		} catch {
 			return cachedReport
-				? formatCodexUsage(cachedReport.report, ctx.model)
+				? formatCodexUsage(cachedReport.report, model)
 				: "usage ?";
 		}
 	})();
@@ -135,10 +138,11 @@ export async function refreshCodexUsageLabel(
 
 async function queryUsage(
 	ctx: ExtensionContext,
+	model: PiModel,
 	timeoutMs: number,
 ): Promise<CodexUsageReport> {
 	try {
-		return await queryViaPiAuth(ctx, timeoutMs);
+		return await queryViaPiAuth(ctx, model, timeoutMs);
 	} catch {
 		return await queryViaCodexAppServer(timeoutMs);
 	}
@@ -146,9 +150,12 @@ async function queryUsage(
 
 async function queryViaPiAuth(
 	ctx: ExtensionContext,
+	model: PiModel,
 	timeoutMs: number,
 ): Promise<CodexUsageReport> {
-	const auth = await resolvePiCodexAuth(ctx);
+	const registry = ctx.modelRegistry;
+	const candidates = codexAuthCandidateModels(model, registry);
+	const auth = await resolvePiCodexAuth(registry, candidates);
 	if (!auth) throw new Error("No Pi OpenAI Codex auth available.");
 
 	const response = await fetchWithTimeout(
@@ -171,11 +178,11 @@ async function queryViaPiAuth(
 }
 
 async function resolvePiCodexAuth(
-	ctx: ExtensionContext,
+	registry: ExtensionContext["modelRegistry"],
+	models: PiModel[],
 ): Promise<{ headers: Record<string, string> } | undefined> {
-	const models = codexAuthCandidateModels(ctx);
 	for (const model of models) {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		const auth = await registry.getApiKeyAndHeaders(model);
 		if (!auth.ok) continue;
 		const headers = { ...(auth.headers ?? {}) };
 		if (!hasHeader(headers, "Authorization") && auth.apiKey)
@@ -187,8 +194,11 @@ async function resolvePiCodexAuth(
 	return undefined;
 }
 
-function codexAuthCandidateModels(ctx: ExtensionContext): PiModel[] {
-	const registry = ctx.modelRegistry as ExtensionContext["modelRegistry"] & {
+function codexAuthCandidateModels(
+	currentModel: PiModel,
+	modelRegistry: ExtensionContext["modelRegistry"],
+): PiModel[] {
+	const registry = modelRegistry as ExtensionContext["modelRegistry"] & {
 		getAvailable?: () => PiModel[];
 		getAll?: () => PiModel[];
 	};
@@ -202,7 +212,7 @@ function codexAuthCandidateModels(ctx: ExtensionContext): PiModel[] {
 		candidates.push(model);
 	};
 
-	add(ctx.model);
+	add(currentModel);
 	for (const model of registry.getAvailable?.() ?? []) add(model);
 	for (const model of registry.getAll?.() ?? []) add(model);
 	return candidates;
