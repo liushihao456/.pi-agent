@@ -20,6 +20,7 @@
     "npm:@plannotator/pi-extension",
     "npm:pi-rtk-optimizer",
     "npm:pi-subagents",
-    "npm:@hieplp/pi-account-switcher"
+    "npm:@hieplp/pi-account-switcher",
+    "npm:@narumitw/pi-goal"
   ]
 }
