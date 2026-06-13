@@ -1,6 +1,6 @@
 {
   "name": "@liushihao456/pi-emacs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension that opens emacsclient in a popup terminal and tracks recently edited files.",
   "type": "module",
   "keywords": [
