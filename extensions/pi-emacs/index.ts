@@ -144,14 +144,12 @@ function findFileExpression(filePath: string) {
 function diredExpression(cwd: string) {
 	return withTerminalMouse(
 		[
-			`(let* ((dir ${JSON.stringify(cwd)})`,
-			"(buf (dired-find-buffer-nocreate dir)))",
-			"(if buf",
-			"(progn",
-			"(with-current-buffer buf",
-			"(revert-buffer :ignore-auto :noconfirm))",
-			"(switch-to-buffer buf))",
-			"(dired dir)))",
+          "(progn",
+          "(mapc (lambda (b)",
+          "(when (eq (buffer-local-value 'major-mode b) 'dired-mode)",
+          "(kill-buffer b)))",
+          "(buffer-list))",
+          `(dired ${JSON.stringify(cwd)}))`,
 		].join(" "),
 	);
 }
