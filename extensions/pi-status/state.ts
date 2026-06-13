@@ -17,8 +17,6 @@ export function createRuntimeState(): RuntimeState {
 		providerLabel: "Unknown",
 		contextLabel: "--",
 		thinkingLevel: "",
-		currentTool: "",
-		toolStartedAt: undefined,
 		workingMessage: undefined,
 		workingIndicatorFrames: undefined,
 		workingIndicatorIntervalMs: undefined,
@@ -31,8 +29,6 @@ export function createRuntimeState(): RuntimeState {
 
 export function createRuntimeHandles(): RuntimeHandles {
 	return {
-		staleTimer: undefined,
-		staleInterval: undefined,
 		projectTimer: undefined,
 		spinnerInterval: undefined,
 	};

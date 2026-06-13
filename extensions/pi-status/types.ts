@@ -11,11 +11,10 @@ export type ComponentId =
 	| "tokens"
 	| "cost"
 	| "turn"
-	| "current_tool"
 	| "tps"
 	| "usage";
 
-export type ActivityState = "idle" | "running" | "tool" | "error" | "stale";
+export type ActivityState = "idle" | "running";
 
 export type ComponentConfig = {
 	id: ComponentId;
@@ -41,8 +40,6 @@ export type UsageCostTotals = {
 };
 
 export type RuntimeHandles = {
-	staleTimer: ReturnType<typeof setTimeout> | undefined;
-	staleInterval: ReturnType<typeof setInterval> | undefined;
 	projectTimer: ReturnType<typeof setInterval> | undefined;
 	spinnerInterval: ReturnType<typeof setInterval> | undefined;
 };
@@ -78,8 +75,6 @@ export type RuntimeState = GitStatusSummary & {
 	providerLabel: string;
 	contextLabel: string;
 	thinkingLevel: string;
-	currentTool: string;
-	toolStartedAt: number | undefined;
 	workingMessage: string | undefined;
 	workingIndicatorFrames: string[] | undefined;
 	workingIndicatorIntervalMs: number | undefined;

@@ -32,8 +32,6 @@ import {
 	PROJECT_REFRESH_INTERVAL_MS,
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
-	STALE_REFRESH_INTERVAL_MS,
-	TOOL_STALE_AFTER_MS,
 } from "./constants.ts";
 import { createPiStatusEditorFactory } from "./editor.ts";
 import {
@@ -167,35 +165,6 @@ export default function piStatus(pi: ExtensionAPI) {
 		usageTimer = setInterval(() => void refreshUsageState(ctx), 60_000);
 	}
 
-	function clearStaleTimer(): void {
-		if (handles.staleTimer) {
-			clearTimeout(handles.staleTimer);
-			handles.staleTimer = undefined;
-		}
-		if (handles.staleInterval) {
-			clearInterval(handles.staleInterval);
-			handles.staleInterval = undefined;
-		}
-	}
-
-	function startStaleTimer(): void {
-		clearStaleTimer();
-		handles.staleTimer = setTimeout(() => {
-			if (state.destroyed || state.activity !== "tool") return;
-			state.activity = "stale";
-			state.spinnerIndex = 0;
-			syncAnimation();
-			requestRender();
-			handles.staleInterval = setInterval(() => {
-				if (state.activity !== "stale") {
-					clearStaleTimer();
-					return;
-				}
-				requestRender();
-			}, STALE_REFRESH_INTERVAL_MS);
-		}, TOOL_STALE_AFTER_MS);
-	}
-
 	function clearSpinner(): void {
 		if (handles.spinnerInterval) {
 			clearInterval(handles.spinnerInterval);
@@ -207,9 +176,9 @@ export default function piStatus(pi: ExtensionAPI) {
 	function syncAnimation(): void {
 		clearSpinner();
 		const frames =
-			state.activity === "error"
-				? SPINNER_FRAMES[state.activity]
-				: (state.workingIndicatorFrames ?? SPINNER_FRAMES[state.activity]);
+			state.activity === "idle"
+				? SPINNER_FRAMES.idle
+				: (state.workingIndicatorFrames ?? SPINNER_FRAMES.running);
 		const animatesStatus = Boolean(frames && frames.length > 1);
 		if (!animatesStatus) return;
 		handles.spinnerInterval = setInterval(() => {
@@ -256,10 +225,7 @@ export default function piStatus(pi: ExtensionAPI) {
 		if (state.destroyed) return;
 		state.running = true;
 		state.activity = "running";
-		state.currentTool = "";
-		state.toolStartedAt = undefined;
 		tpsOnAgentStart(state);
-		clearStaleTimer();
 		syncAnimation();
 		state.turnIndex = 1;
 		syncInteractiveState(state, ctx, pi);
@@ -271,9 +237,6 @@ export default function piStatus(pi: ExtensionAPI) {
 		if (state.destroyed) return;
 		state.running = false;
 		state.activity = "idle";
-		state.currentTool = "";
-		state.toolStartedAt = undefined;
-		clearStaleTimer();
 		tpsOnAgentEnd(state);
 		syncInteractiveState(state, ctx, pi);
 		syncAnimation();
@@ -283,7 +246,7 @@ export default function piStatus(pi: ExtensionAPI) {
 
 	pi.on("turn_start", async (event, ctx) => {
 		if (state.destroyed) return;
-		state.activity = state.currentTool ? state.activity : "running";
+		state.activity = "running";
 		state.turnIndex = event.turnIndex;
 		syncAnimation();
 		syncInteractiveState(state, ctx, pi);
@@ -311,31 +274,6 @@ export default function piStatus(pi: ExtensionAPI) {
 		void refreshProjectState(ctx);
 	});
 
-	pi.on("tool_execution_start", async (event, _ctx) => {
-		if (state.destroyed) return;
-		state.activity = "tool";
-		state.currentTool = event.toolName;
-		state.toolStartedAt = Date.now();
-		syncAnimation();
-		startStaleTimer();
-		requestRender();
-	});
-
-	pi.on("tool_execution_update", async (_event, _ctx) => {
-		if (state.destroyed) return;
-	});
-
-	pi.on("tool_execution_end", async (event, ctx) => {
-		if (state.destroyed) return;
-		clearStaleTimer();
-		state.activity = event.isError ? "error" : "running";
-		state.currentTool = "";
-		state.toolStartedAt = undefined;
-		syncAnimation();
-		requestRender();
-		void refreshProjectState(ctx);
-	});
-
 	pi.on("model_select", async (_event, ctx) => {
 		if (state.destroyed) return;
 		syncInteractiveState(state, ctx, pi);
@@ -351,7 +289,6 @@ export default function piStatus(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		state.destroyed = true;
-		clearStaleTimer();
 		clearSpinner();
 		if (handles.projectTimer) clearInterval(handles.projectTimer);
 		if (usageTimer) clearInterval(usageTimer);

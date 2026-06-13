@@ -5,9 +5,7 @@ import type {
 	Zone,
 } from "./types.ts";
 
-export const STALE_REFRESH_INTERVAL_MS = 1000;
 export const PROJECT_REFRESH_INTERVAL_MS = 30_000;
-export const TOOL_STALE_AFTER_MS = 30_000;
 export const SPINNER_INTERVAL_MS = 80;
 
 export const ZONE_IDS: readonly Zone[] = [
@@ -35,7 +33,6 @@ export const ALL_COMPONENT_IDS = [
 	"context",
 	"tokens",
 	"turn",
-	"current_tool",
 	"tps",
 	"usage",
 ] as const satisfies readonly ComponentId[];
@@ -51,7 +48,6 @@ export const COMPONENT_LABELS: Record<ComponentId, string> = {
 	context: "Context usage",
 	tokens: "Input/output token totals",
 	turn: "Current turn number",
-	current_tool: "Currently executing tool",
 	tps: "Tokens per second",
 	usage: "Codex 5h and weekly quota",
 };
@@ -66,7 +62,6 @@ export const DEFAULT_CONFIG: PiStatusConfig = {
 		{ id: "thinking", enabled: true, zone: "bottom-right" },
 		{ id: "usage", enabled: true, zone: "bottom-right" },
 		{ id: "turn", enabled: false, zone: "top-left" },
-		{ id: "current_tool", enabled: false, zone: "top-left" },
 		{ id: "git", enabled: false, zone: "top-left" },
 		{ id: "runtime", enabled: false, zone: "top-left" },
 		{ id: "cost", enabled: false, zone: "top-right" },
@@ -87,7 +82,6 @@ export const STATUS_STYLES: Record<ComponentId | "separator", string> = {
 	tokens: "bright-black",
 	usage: "bold green",
 	turn: "bright-black",
-	current_tool: "bold cyan",
 	tps: "bold green",
 	separator: "bright-black",
 };
@@ -95,15 +89,4 @@ export const STATUS_STYLES: Record<ComponentId | "separator", string> = {
 export const SPINNER_FRAMES: Record<ActivityState, readonly string[]> = {
 	idle: ["󰄯"],
 	running: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
-	tool: [""],
-	error: [""],
-	stale: ["", "", ""],
-};
-
-export const ACTIVITY_THEME_COLORS: Record<ActivityState, string> = {
-	idle: "success",
-	running: "accent",
-	tool: "warning",
-	error: "error",
-	stale: "warning",
 };

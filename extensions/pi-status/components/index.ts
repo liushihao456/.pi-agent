@@ -2,7 +2,6 @@ import type { ComponentId } from "../types.ts";
 import { renderCodexUsageComponent } from "./codex-usage.ts";
 import { renderContextComponent } from "./context.ts";
 import { renderCostComponent } from "./cost.ts";
-import { renderCurrentToolComponent } from "./current-tool.ts";
 import { renderCwdComponent } from "./cwd.ts";
 import { renderGitComponent } from "./git.ts";
 import { renderModelComponent } from "./model.ts";
@@ -26,7 +25,6 @@ export const COMPONENT_RENDERERS: Record<ComponentId, ComponentRenderer> = {
 	context: renderContextComponent,
 	tokens: renderTokensComponent,
 	turn: renderTurnComponent,
-	current_tool: renderCurrentToolComponent,
 	tps: renderTpsComponent,
 	usage: renderCodexUsageComponent,
 };
