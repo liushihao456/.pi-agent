@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
+	fuzzyFilter,
 	getKeybindings,
 	Input,
 	Key,
@@ -108,10 +109,6 @@ function sessionTitle(session: SessionInfo): string {
 		session.firstMessage?.trim() ||
 		session.id.slice(0, 8);
 	return title.replace(/\s+/g, " ");
-}
-
-function safeLower(value: string): string {
-	return value.toLowerCase();
 }
 
 function makeProjects(sessions: SessionInfo[]): ProjectGroup[] {
@@ -543,25 +540,24 @@ class ProjectSessionPicker implements Component, Focusable {
 	}
 
 	private filteredProjects(): ProjectGroup[] {
-		const query = safeLower(this.search.trim());
+		const query = this.search.trim();
 		if (!query) return this.projects;
-		return this.projects.filter((project) => {
-			const haystack = safeLower(
-				`${project.name} ${project.path} ${project.displayPath}`,
-			);
-			return haystack.includes(query);
-		});
+		return fuzzyFilter(
+			this.projects,
+			query,
+			(project) => `${project.name} ${project.path} ${project.displayPath}`,
+		);
 	}
 
 	private filteredSessions(project: ProjectGroup): SessionInfo[] {
-		const query = safeLower(this.search.trim());
+		const query = this.search.trim();
 		if (!query) return project.sessions;
-		return project.sessions.filter((session) => {
-			const haystack = safeLower(
+		return fuzzyFilter(
+			project.sessions,
+			query,
+			(session) =>
 				`${sessionTitle(session)} ${session.firstMessage} ${session.name ?? ""} ${session.path}`,
-			);
-			return haystack.includes(query);
-		});
+		);
 	}
 
 	private move(delta: number): void {
@@ -870,11 +866,9 @@ class FileExplorer implements Component, Focusable {
 	}
 
 	private filteredEntries(): FileEntry[] {
-		const query = safeLower(this.search.trim().split("/").pop() ?? "");
+		const query = this.search.trim().split("/").pop() ?? "";
 		if (!query) return this.entries;
-		return this.entries.filter((entry) =>
-			safeLower(entry.name).includes(query),
-		);
+		return fuzzyFilter(this.entries, query, (entry) => entry.name);
 	}
 
 	private clampSelection(): void {
