@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { rgPath } from "@vscode/ripgrep";
 import { readdirSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import path, { isAbsolute, resolve } from "node:path";
 import {
@@ -25,7 +25,11 @@ type Theme = {
 
 type EmacsState = {
 	startedEmacsServer: boolean;
+	serverName: string;
+	legacyDefaultServer?: boolean;
 	serverStartPromise?: Promise<void>;
+	watchdogPid?: number;
+	processShutdownHandlerVersion?: number;
 	lastEditedFile?: string;
 };
 
@@ -48,7 +52,13 @@ type FileEntry = {
 
 const state: EmacsState = ((globalThis as any).__piEmacsExtensionState ??= {
 	startedEmacsServer: false,
+	serverName: `pi-emacs-${process.pid}`,
 });
+
+if (!state.serverName) {
+	state.legacyDefaultServer = state.startedEmacsServer;
+	state.serverName = `pi-emacs-${process.pid}`;
+}
 
 const FILE_EXPLORER_MAX_VISIBLE = 8;
 const PROJECT_PICKER_MAX_VISIBLE = 12;
@@ -116,8 +126,151 @@ function execText(command: string, args: string[], options: SpawnOptions = {}) {
 	});
 }
 
+function emacsClientServerArgs(args: string[]) {
+	return ["-s", state.serverName, ...args];
+}
+
 function emacsClient(args: string[], options: SpawnOptions = {}) {
-	return run("emacsclient", args, options);
+	return run("emacsclient", emacsClientServerArgs(args), options);
+}
+
+function emacsClientSync(args: string[], timeoutMs = 5000) {
+	return spawnSync("emacsclient", emacsClientServerArgs(args), {
+		stdio: "ignore",
+		timeout: timeoutMs,
+		env: process.env,
+	});
+}
+
+function sleep(ms: number) {
+	return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function pidAlive(pid?: number) {
+	if (!pid) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function emacsWatchdogScript() {
+	return `
+const { spawn, spawnSync } = require("node:child_process");
+const parentPid = Number(process.argv[1]);
+const serverName = process.argv[2];
+const startDaemon = process.argv[3] === "1";
+let stopping = false;
+let child;
+function parentAlive() {
+  try {
+    process.kill(parentPid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === "EPERM";
+  }
+}
+function killServer() {
+  spawnSync("emacsclient", ["-s", serverName, "--eval", "(kill-emacs)"], {
+    stdio: "ignore",
+    timeout: 5000,
+    env: process.env,
+  });
+}
+function stop() {
+  if (stopping) return;
+  stopping = true;
+  killServer();
+  try {
+    if (child && child.pid) process.kill(child.pid, "SIGTERM");
+  } catch {}
+  setTimeout(() => {
+    try {
+      if (child && child.pid) process.kill(child.pid, "SIGKILL");
+    } catch {}
+    process.exit(0);
+  }, 1000);
+}
+if (startDaemon) {
+  child = spawn("emacs", ["--fg-daemon=" + serverName], {
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.on("error", () => process.exit(1));
+  child.on("exit", () => process.exit(0));
+}
+let ticks = 0;
+setInterval(() => {
+  if (!parentAlive()) {
+    stop();
+    return;
+  }
+  if (!startDaemon && ++ticks % 10 === 0) {
+    const result = spawnSync("emacsclient", ["-s", serverName, "--eval", "(emacs-pid)"], {
+      stdio: "ignore",
+      timeout: 1000,
+      env: process.env,
+    });
+    if (result.status !== 0) process.exit(0);
+  }
+}, 1000);
+process.on("SIGTERM", stop);
+process.on("SIGHUP", stop);
+process.on("SIGINT", stop);
+`;
+}
+
+type WatchdogMode = "start-daemon" | "watch-existing";
+
+function startEmacsWatchdog(mode: WatchdogMode) {
+	const startDaemon = mode === "start-daemon";
+	if (!startDaemon && pidAlive(state.watchdogPid)) return;
+	const watchdog = spawn(
+		process.execPath,
+		[
+			"-e",
+			emacsWatchdogScript(),
+			String(process.pid),
+			state.serverName,
+			startDaemon ? "1" : "0",
+		],
+		{
+			detached: true,
+			stdio: "ignore",
+			env: process.env,
+		},
+	);
+	state.watchdogPid = watchdog.pid;
+	watchdog.unref();
+}
+
+async function waitForEmacsServer(timeoutMs: number) {
+	const deadline = Date.now() + timeoutMs;
+	let lastError: unknown;
+	while (Date.now() < deadline) {
+		try {
+			await emacsClient(["--eval", "(emacs-pid)"], { timeoutMs: 1000 });
+			return;
+		} catch (error) {
+			lastError = error;
+			await sleep(250);
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error("emacs daemon did not start");
+}
+
+function stopLegacyDefaultServerIfNeeded() {
+	if (!state.legacyDefaultServer) return;
+	spawnSync("emacsclient", ["--eval", "(kill-emacs)"], {
+		stdio: "ignore",
+		timeout: 5000,
+		env: process.env,
+	});
+	state.legacyDefaultServer = false;
 }
 
 function withTerminalMouse(expression: string) {
@@ -144,12 +297,12 @@ function findFileExpression(filePath: string) {
 function diredExpression(cwd: string) {
 	return withTerminalMouse(
 		[
-          "(progn",
-          "(mapc (lambda (b)",
-          "(when (eq (buffer-local-value 'major-mode b) 'dired-mode)",
-          "(kill-buffer b)))",
-          "(buffer-list))",
-          `(dired ${JSON.stringify(cwd)}))`,
+			"(progn",
+			"(mapc (lambda (b)",
+			"(when (eq (buffer-local-value 'major-mode b) 'dired-mode)",
+			"(kill-buffer b)))",
+			"(buffer-list))",
+			`(dired ${JSON.stringify(cwd)}))`,
 		].join(" "),
 	);
 }
@@ -730,34 +883,60 @@ async function chooseProjectFile(
 
 async function ensureEmacsServer() {
 	state.serverStartPromise ??= (async () => {
+		stopLegacyDefaultServerIfNeeded();
+
 		try {
 			await emacsClient(["--eval", "(emacs-pid)"], { timeoutMs: 2000 });
+			state.startedEmacsServer = true;
+			startEmacsWatchdog("watch-existing");
 			return;
 		} catch {
-			// No reachable server. Start daemon below.
+			// No reachable named server. Start one under watchdog supervision.
 		}
 
-		console.log("[emacs] starting daemon...");
-		await run("emacs", ["--daemon"], { timeoutMs: 15000 });
+		startEmacsWatchdog("start-daemon");
+		await waitForEmacsServer(15000);
 		state.startedEmacsServer = true;
-		console.log("[emacs] daemon started");
-	})();
+	})().catch((error) => {
+		state.serverStartPromise = undefined;
+		throw error;
+	});
 
 	return state.serverStartPromise;
 }
 
 async function stopEmacsServer() {
-	if (!state.startedEmacsServer) return;
+	if (!state.startedEmacsServer && !state.serverStartPromise) return;
 
 	try {
 		await state.serverStartPromise;
 	} catch {
-		return;
+		// Start failure means there may be nothing to stop.
 	}
 
-	await emacsClient(["--eval", "(kill-emacs)"], { timeoutMs: 5000 });
+	try {
+		await emacsClient(["--eval", "(kill-emacs)"], { timeoutMs: 5000 });
+	} catch {
+		// Watchdog still handles parent-death cleanup if graceful stop fails.
+	}
 	state.startedEmacsServer = false;
 	state.serverStartPromise = undefined;
+	state.watchdogPid = undefined;
+}
+
+function stopEmacsServerSync() {
+	if (!state.startedEmacsServer && !state.serverStartPromise) return;
+	emacsClientSync(["--eval", "(kill-emacs)"]);
+	state.startedEmacsServer = false;
+	state.serverStartPromise = undefined;
+	state.watchdogPid = undefined;
+}
+
+function installProcessShutdownHandler() {
+	const handlerVersion = 2;
+	if (state.processShutdownHandlerVersion === handlerVersion) return;
+	state.processShutdownHandlerVersion = handlerVersion;
+	process.on("exit", () => stopEmacsServerSync());
 }
 
 async function openEmacsWithArgs(
@@ -829,6 +1008,8 @@ async function runProjectFindFile(ctx: ExtensionContext) {
 }
 
 export default function (pi: ExtensionAPI) {
+	installProcessShutdownHandler();
+
 	pi.on("session_start", () => {
 		ensureEmacsServer().catch((error) => {
 			console.error(`[emacs] failed to start server: ${error.message}`);
