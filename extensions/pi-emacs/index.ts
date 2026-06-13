@@ -84,7 +84,18 @@ function findFileExpression(path: string) {
 }
 
 function diredExpression(cwd: string) {
-	return withTerminalMouse(`(dired ${JSON.stringify(cwd)})`);
+	return withTerminalMouse(
+		[
+			`(let* ((dir ${JSON.stringify(cwd)})`,
+			"(buf (dired-find-buffer-nocreate dir)))",
+			"(if buf",
+			"(progn",
+			"(with-current-buffer buf",
+			"(revert-buffer :ignore-auto :noconfirm))",
+			"(switch-to-buffer buf))",
+			"(dired dir)))",
+		].join(" "),
+	);
 }
 
 function emacsClientArgs(cwd: string) {
