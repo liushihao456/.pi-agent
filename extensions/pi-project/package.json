@@ -1,0 +1,36 @@
+{
+  "name": "@liushihao456/pi-project",
+  "version": "0.1.0",
+  "description": "Pi extension that switches projects by choosing sessions grouped by cwd, with an IME-friendly custom picker and folder explorer.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "project",
+    "session",
+    "picker"
+  ],
+  "license": "MIT",
+  "author": "liushihao",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "check": "bun build ./index.ts --target=node --outfile=/tmp/pi-project-check.js --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
