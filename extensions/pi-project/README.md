@@ -1,4 +1,4 @@
-# @liushihao456/pi-project
+# pi-project
 
 Pi extension that adds `/project`, a project/session switcher derived from existing session working directories.
 
@@ -15,13 +15,13 @@ Pi extension that adds `/project`, a project/session switcher derived from exist
 ## Install
 
 ```bash
-pi install npm:@liushihao456/pi-project
+pi install npm:pi-project
 ```
 
 Or try once:
 
 ```bash
-pi -e npm:@liushihao456/pi-project
+pi -e npm:pi-project
 ```
 
 ## Usage
