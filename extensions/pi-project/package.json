@@ -1,7 +1,7 @@
 {
   "name": "pi-project",
-  "version": "0.1.0",
-  "description": "Pi extension that switches projects by choosing sessions grouped by cwd, with an IME-friendly custom picker and folder explorer.",
+  "version": "0.1.1",
+  "description": "Pi extension that switches projects/sessions by a single command, with an tidy picker and project explorer.",
   "type": "module",
   "keywords": [
     "pi-package",
