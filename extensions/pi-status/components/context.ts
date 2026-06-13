@@ -34,5 +34,5 @@ export function renderContextComponent({
 
 	const percentLabel =
 		context.percent === undefined ? "?%" : `${context.percent}%`;
-	return `ctx ${renderProgressBar(context.percent)} ${percentLabel}/${context.window}`;
+	return `${renderProgressBar(context.percent)}`;
 }

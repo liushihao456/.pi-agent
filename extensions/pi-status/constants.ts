@@ -60,11 +60,11 @@ export const DEFAULT_CONFIG: PiStatusConfig = {
 	separator: " · ",
 	components: [
 		{ id: "status", enabled: true, zone: "top-left" },
+		{ id: "cwd", enabled: true, zone: "top-right" },
 		{ id: "context", enabled: true, zone: "top-right" },
 		{ id: "model", enabled: true, zone: "bottom-right" },
 		{ id: "thinking", enabled: true, zone: "bottom-right" },
 		{ id: "usage", enabled: true, zone: "bottom-right" },
-		{ id: "cwd", enabled: false, zone: "top-left" },
 		{ id: "turn", enabled: false, zone: "top-left" },
 		{ id: "current_tool", enabled: false, zone: "top-left" },
 		{ id: "git", enabled: false, zone: "top-left" },
