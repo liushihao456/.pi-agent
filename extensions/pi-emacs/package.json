@@ -1,7 +1,7 @@
 {
   "name": "@liushihao456/pi-emacs",
-  "version": "0.1.1",
-  "description": "Pi extension that opens emacsclient in a popup terminal and tracks recently edited files.",
+  "version": "0.1.2",
+  "description": "Pi extension that allows switching to emacs seamlessly in a popup terminal.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -30,5 +30,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.79.2",
+    "@vscode/ripgrep": "^1.18.0"
   }
 }

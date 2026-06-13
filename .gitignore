@@ -3,3 +3,5 @@
 /npm/
 /sessions/
 /trust.json
+
+/extensions/*/node_modules/
