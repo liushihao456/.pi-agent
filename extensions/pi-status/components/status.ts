@@ -8,19 +8,24 @@ export function renderStatusComponent({
 }: ComponentRenderInput): string {
 	if (state.activity === "idle") return theme.fg("accent", "𝜋");
 
-	const frames = SPINNER_FRAMES[state.activity];
-	const icon = frames[state.spinnerIndex % frames.length];
+	const frames =
+		state.activity === "error"
+			? SPINNER_FRAMES[state.activity]
+			: (state.workingIndicatorFrames ?? SPINNER_FRAMES[state.activity]);
+	const icon =
+		frames.length > 0 ? frames[state.spinnerIndex % frames.length] : "";
 	const elapsed =
 		state.activity === "stale" && state.toolStartedAt
 			? ` ${Math.floor((Date.now() - state.toolStartedAt) / 1000)}s`
 			: "";
+	const workingMessage = state.workingMessage ?? "Working...";
 	const label =
 		state.activity === "tool" || state.activity === "stale"
-			? `Running ${state.currentTool || "tool"}...${elapsed}`
+			? `${workingMessage}${elapsed}`
 			: state.activity === "error"
 				? "Error"
-				: "Working...";
-	const text = `${icon}\u202F${label}`;
+				: workingMessage;
+	const text = icon ? `${icon}\u202F${label}` : label;
 	return theme.fg(
 		ACTIVITY_THEME_COLORS[state.activity] as ThemeColor,
 		state.activity === "error" ? theme.bold(text) : text,

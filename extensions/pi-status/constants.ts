@@ -8,7 +8,7 @@ import type {
 export const STALE_REFRESH_INTERVAL_MS = 1000;
 export const PROJECT_REFRESH_INTERVAL_MS = 30_000;
 export const TOOL_STALE_AFTER_MS = 30_000;
-export const SPINNER_INTERVAL_MS = 250;
+export const SPINNER_INTERVAL_MS = 80;
 
 export const ZONE_IDS: readonly Zone[] = [
 	"top-left",
@@ -94,7 +94,7 @@ export const STATUS_STYLES: Record<ComponentId | "separator", string> = {
 
 export const SPINNER_FRAMES: Record<ActivityState, readonly string[]> = {
 	idle: ["󰄯"],
-	running: ["◐", "◓", "◑", "◒"],
+	running: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 	tool: [""],
 	error: [""],
 	stale: ["", "", ""],

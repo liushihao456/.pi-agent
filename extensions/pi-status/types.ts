@@ -80,6 +80,9 @@ export type RuntimeState = GitStatusSummary & {
 	thinkingLevel: string;
 	currentTool: string;
 	toolStartedAt: number | undefined;
+	workingMessage: string | undefined;
+	workingIndicatorFrames: string[] | undefined;
+	workingIndicatorIntervalMs: number | undefined;
 	tpsLabel: string;
 	codexUsageLabel: string;
 	runtime?: RuntimeInfo;

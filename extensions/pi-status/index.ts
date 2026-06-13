@@ -1,6 +1,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type CommandContext,
@@ -57,6 +58,35 @@ export default function piStatus(pi: ExtensionAPI) {
 		requestWidgetRender?.();
 	}
 
+	function installWorkingUiPatch(ctx: ExtensionContext) {
+		const messageKey = Symbol.for("pi-status:original-set-working-message");
+		const indicatorKey = Symbol.for("pi-status:original-set-working-indicator");
+		const ui = ctx.ui as typeof ctx.ui & Record<symbol, unknown>;
+
+		const originalSetWorkingMessage =
+			(ui[messageKey] as ((message?: string) => void) | undefined) ??
+			ctx.ui.setWorkingMessage.bind(ctx.ui);
+		ui[messageKey] = originalSetWorkingMessage;
+		ctx.ui.setWorkingMessage = (message?: string) => {
+			state.workingMessage = message;
+			originalSetWorkingMessage(message);
+			requestRender();
+		};
+
+		const originalSetWorkingIndicator =
+			(ui[indicatorKey] as
+				| ((options?: WorkingIndicatorOptions) => void)
+				| undefined) ?? ctx.ui.setWorkingIndicator.bind(ctx.ui);
+		ui[indicatorKey] = originalSetWorkingIndicator;
+		ctx.ui.setWorkingIndicator = (options?: WorkingIndicatorOptions) => {
+			state.workingIndicatorFrames = options?.frames;
+			state.workingIndicatorIntervalMs = options?.intervalMs;
+			originalSetWorkingIndicator(options);
+			syncAnimation();
+			requestRender();
+		};
+	}
+
 	async function refreshProjectState(ctx: ExtensionContext) {
 		if (projectRefreshInFlight) {
 			projectRefreshPending = true;
@@ -90,6 +120,7 @@ export default function piStatus(pi: ExtensionAPI) {
 	function installEditor(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
 		lastCtx = ctx;
+		installWorkingUiPatch(ctx);
 		ctx.ui.setWorkingVisible(false);
 		ctx.ui.setFooter(() => ({
 			render: () => [],
@@ -175,7 +206,10 @@ export default function piStatus(pi: ExtensionAPI) {
 
 	function syncAnimation(): void {
 		clearSpinner();
-		const frames = SPINNER_FRAMES[state.activity];
+		const frames =
+			state.activity === "error"
+				? SPINNER_FRAMES[state.activity]
+				: (state.workingIndicatorFrames ?? SPINNER_FRAMES[state.activity]);
 		const animatesStatus = Boolean(frames && frames.length > 1);
 		if (!animatesStatus) return;
 		handles.spinnerInterval = setInterval(() => {
@@ -185,7 +219,7 @@ export default function piStatus(pi: ExtensionAPI) {
 			}
 			state.spinnerIndex = (state.spinnerIndex + 1) % 1000;
 			requestRender();
-		}, SPINNER_INTERVAL_MS);
+		}, state.workingIndicatorIntervalMs ?? SPINNER_INTERVAL_MS);
 	}
 
 	const cmdCtx: CommandContext = {
