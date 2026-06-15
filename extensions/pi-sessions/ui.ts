@@ -40,6 +40,12 @@ type SessionsActions = {
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
 };
 
+type WidgetSnapshot = {
+	attached: string | null;
+	sessions: SessionInfo[];
+	updatedAt: number;
+};
+
 const PARENT_SESSION_ID = "__parent__";
 
 function isCtrl(data: string, key: "o" | "r" | "k"): boolean {
@@ -66,10 +72,99 @@ function cwdBasename(cwd: string): string {
 function computeShortNames(sessions: SessionInfo[]): void {
 	const counts = new Map<string, number>();
 	for (const session of sessions) {
-		const base = cwdBasename(session.cwd || "");
+		const base = cwdBasename(session.cwd || "") || session.name;
 		const n = counts.get(base) ?? 0;
 		counts.set(base, n + 1);
 		session.shortName = n === 0 ? base : `${base}<${n}>`;
+	}
+}
+
+export class SessionWidget implements Component {
+	private frame = 0;
+	private timer: NodeJS.Timeout | null = null;
+
+	constructor(
+		private readonly theme: Theme,
+		private readonly getSnapshot: () => WidgetSnapshot | null,
+		private readonly requestRender: () => void,
+	) {}
+
+	render(width: number): string[] {
+		const snapshot = this.getSnapshot();
+		if (!snapshot || snapshot.sessions.length === 0) {
+			this.updateTimer(false);
+			return [];
+		}
+		const sessions = [...snapshot.sessions];
+		computeShortNames(sessions);
+		const ordered = this.currentLast(sessions, snapshot.attached);
+		const hasWorking = ordered.some((session) => this.isWorking(session));
+		this.updateTimer(hasWorking);
+		const segments = ordered.map((session) =>
+			this.segment(session, snapshot.attached),
+		);
+		const line = this.fitFromRight(segments, width);
+		if (!line) return [];
+		return [" ".repeat(Math.max(0, width - visibleWidth(line))) + line];
+	}
+
+	invalidate(): void {}
+
+	dispose(): void {
+		this.updateTimer(false);
+	}
+
+	private currentLast(
+		sessions: SessionInfo[],
+		attached: string | null,
+	): SessionInfo[] {
+		if (!attached) return sessions;
+		const current = sessions.find(
+			(session) => session.id === attached || session.name === attached,
+		);
+		if (!current) return sessions;
+		return sessions.filter((session) => session !== current).concat(current);
+	}
+
+	private isWorking(session: SessionInfo): boolean {
+		return (session.agentStatus || "idle") === "working";
+	}
+
+	private segment(session: SessionInfo, attached: string | null): string {
+		const current = session.id === attached || session.name === attached;
+		const name = this.theme.fg(
+			current ? "accent" : "muted",
+			truncateToWidth(session.shortName || session.name, 18, "…"),
+		);
+		if (this.isWorking(session)) {
+			const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+			return `${this.theme.fg("accent", frames[this.frame % frames.length])} ${name}`;
+		}
+		return `${this.theme.fg("success", "✓")} ${name}`;
+	}
+
+	private fitFromRight(segments: string[], width: number): string {
+		let line = "";
+		for (let i = segments.length - 1; i >= 0; i--) {
+			const next = line ? `${segments[i]}  ${line}` : segments[i]!;
+			if (visibleWidth(next) > width) break;
+			line = next;
+		}
+		return line;
+	}
+
+	private updateTimer(shouldRun: boolean): void {
+		if (shouldRun && !this.timer) {
+			this.timer = setInterval(() => {
+				this.frame++;
+				this.requestRender();
+			}, 80);
+			return;
+		}
+		if (!shouldRun && this.timer) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
 	}
 }
 

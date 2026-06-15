@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pty from "@homebridge/node-pty-prebuilt-multiarch";
-import { showSessionsView } from "./ui.ts";
+import { SessionWidget, showSessionsView } from "./ui.ts";
 
 function readFirstMessage(filePath: string): string {
 	try {
@@ -63,9 +63,17 @@ const dataDir = path.join(os.homedir(), ".pi", "agent", "pi-sessions");
 const bridgeSocketPath = path.join(dataDir, `bridge-${process.pid}.sock`);
 const sessions = new Map<string, any>();
 const locks = new Map<string, { sessionId: string; acquiredAt: number }>();
+const widgetSubscribers = new Set<net.Socket>();
+const parentWidgetRenders = new Set<() => void>();
 let bridgeServer: net.Server | null = null;
 let attachedSession: string | null = null;
-const state = { parentCwd: process.cwd(), parentTranscript: "" };
+let childWidgetSnapshot: any = null;
+let childWidgetSocket: net.Socket | null = null;
+const state = {
+	parentCwd: process.cwd(),
+	parentTranscript: "",
+	parentAgentStatus: "idle",
+};
 
 const PARENT_SESSION_ID = "__parent__";
 
@@ -117,12 +125,59 @@ function publicSession(s: any): SessionInfo {
 	};
 }
 
+function widgetSnapshot(): any {
+	return {
+		attached: attachedSession || PARENT_SESSION_ID,
+		updatedAt: Date.now(),
+		sessions: [
+			{
+				id: PARENT_SESSION_ID,
+				name: "parent",
+				cwd: state.parentCwd || process.cwd(),
+				state: "idle",
+				status: "parent",
+				pid: process.pid,
+				lastActivityAt: 0,
+				agentStatus: state.parentAgentStatus || "idle",
+				transcript: state.parentTranscript || "",
+			},
+			...[...sessions.values()]
+				.filter((session) => session.state === "running")
+				.map(publicSession),
+		],
+	};
+}
+
+function sendWidgetSnapshot(
+	socket: net.Socket,
+	snapshot = widgetSnapshot(),
+): void {
+	try {
+		sendJson(socket, { type: "widgetSnapshot", snapshot });
+	} catch {
+		widgetSubscribers.delete(socket);
+	}
+}
+
+function broadcastWidgetSnapshot(): void {
+	const snapshot = widgetSnapshot();
+	for (const socket of [...widgetSubscribers])
+		sendWidgetSnapshot(socket, snapshot);
+	if (attachedSession) return;
+	for (const render of [...parentWidgetRenders]) {
+		try {
+			render();
+		} catch {}
+	}
+}
+
 function notifySession(s: any): void {
 	for (const cb of [...s.subscribers]) {
 		try {
 			cb();
 		} catch {}
 	}
+	broadcastWidgetSnapshot();
 }
 
 function createSession(opts: {
@@ -289,6 +344,14 @@ function startBridgeServer(): void {
 				if (!line.trim()) continue;
 				try {
 					const req = JSON.parse(line);
+					if (req.action === "subscribeWidget") {
+						widgetSubscribers.add(socket);
+						socket.once("close", () => widgetSubscribers.delete(socket));
+						socket.once("error", () => widgetSubscribers.delete(socket));
+						sendJson(socket, { id: req.id, success: true, data: { ok: true } });
+						sendWidgetSnapshot(socket);
+						continue;
+					}
 					const data = handleBridgeRequest(req);
 					sendJson(socket, { id: req.id, success: true, data });
 				} catch (error) {
@@ -402,6 +465,39 @@ function bridgeCall(
 	});
 }
 
+function subscribeWidgetSnapshots(onSnapshot: (snapshot: any) => void): void {
+	const socketPath = process.env.PI_SESSIONS_BRIDGE_SOCKET;
+	if (!socketPath || childWidgetSocket) return;
+	const socket = net.createConnection(socketPath);
+	childWidgetSocket = socket;
+	const id = `child-widget-${process.pid}-${Date.now().toString(36)}`;
+	let buffer = "";
+	socket.on("connect", () =>
+		socket.write(JSON.stringify({ id, action: "subscribeWidget" }) + "\n"),
+	);
+	socket.on("data", (chunk) => {
+		buffer += chunk.toString("utf8");
+		while (true) {
+			const i = buffer.indexOf("\n");
+			if (i < 0) break;
+			const line = buffer.slice(0, i);
+			buffer = buffer.slice(i + 1);
+			if (!line.trim()) continue;
+			try {
+				const msg = JSON.parse(line);
+				if (msg.type === "widgetSnapshot" && msg.snapshot) {
+					onSnapshot(msg.snapshot);
+				}
+			} catch {}
+		}
+	});
+	const clear = () => {
+		if (childWidgetSocket === socket) childWidgetSocket = null;
+	};
+	socket.once("close", clear);
+	socket.once("error", clear);
+}
+
 async function listSessions(): Promise<SessionInfo[]> {
 	return [...sessions.values()]
 		.filter((session) => session.state === "running")
@@ -438,6 +534,7 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 	const first = findSession(name);
 	if (!first) throw new Error(`session not found: ${name}`);
 	attachedSession = first.name;
+	broadcastWidgetSnapshot();
 
 	await ctx.ui.custom(
 		(tui: any, _theme: any, _keybindings: any, done: () => void) => {
@@ -476,6 +573,7 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 				disposePtyData(ptyDataDisposable);
 				current = next;
 				attachedSession = next.name;
+				broadcastWidgetSnapshot();
 				resize();
 				process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
 				if (next.replay) process.stdout.write(next.replay);
@@ -494,6 +592,7 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 				const next = findSession(attachedSession);
 				if (!next || next.state !== "running") {
 					attachedSession = null;
+					broadcastWidgetSnapshot();
 					close();
 					return;
 				}
@@ -531,9 +630,11 @@ async function openSessions(ctx: CommandContext): Promise<void> {
 		switchTo: async (name: string) => {
 			if (name === PARENT_SESSION_ID || name === "parent") {
 				attachedSession = null;
+				broadcastWidgetSnapshot();
 				return;
 			}
 			attachedSession = name;
+			broadcastWidgetSnapshot();
 			setTimeout(() => void attachSession(ctx, name), 0);
 		},
 		newSession: async () => {
@@ -543,6 +644,7 @@ async function openSessions(ctx: CommandContext): Promise<void> {
 				cwd: ctx.cwd,
 			});
 			attachedSession = session.name;
+			broadcastWidgetSnapshot();
 			setTimeout(() => void attachSession(ctx, session.name), 0);
 		},
 		newSessionInFolder: async (cwd: string) => {
@@ -552,6 +654,7 @@ async function openSessions(ctx: CommandContext): Promise<void> {
 				cwd,
 			});
 			attachedSession = session.name;
+			broadcastWidgetSnapshot();
 			setTimeout(() => void attachSession(ctx, session.name), 0);
 		},
 		resumeSession: async () => {
@@ -562,6 +665,7 @@ async function openSessions(ctx: CommandContext): Promise<void> {
 				resume: true,
 			});
 			attachedSession = session.name;
+			broadcastWidgetSnapshot();
 			setTimeout(() => void attachSession(ctx, session.name), 0);
 		},
 		killSession: async (name: string) => {
@@ -653,6 +757,18 @@ export default function (pi: ExtensionAPI) {
 			handler: async (ctx: CommandContext) => openChildSessions(ctx),
 		});
 		pi.on("session_start", (_event: any, ctx: CommandContext) => {
+			ctx.ui.setWidget("pi-sessions", (tui: any, theme: any) => {
+				const requestRender = () => tui.requestRender();
+				subscribeWidgetSnapshots((snapshot) => {
+					childWidgetSnapshot = snapshot;
+					requestRender();
+				});
+				return new SessionWidget(
+					theme,
+					() => childWidgetSnapshot,
+					requestRender,
+				);
+			});
 			const transcript = resolveTranscriptName(
 				ctx.sessionManager?.getSessionName?.(),
 				ctx.sessionManager?.getSessionFile?.(),
@@ -679,6 +795,11 @@ export default function (pi: ExtensionAPI) {
 				status: "idle",
 			}).catch(() => {});
 		});
+		pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
+			ctx.ui.setWidget("pi-sessions", undefined);
+			childWidgetSocket?.destroy();
+			childWidgetSocket = null;
+		});
 		return;
 	}
 
@@ -689,8 +810,34 @@ export default function (pi: ExtensionAPI) {
 			ctx.sessionManager?.getSessionName?.(),
 			ctx.sessionManager?.getSessionFile?.(),
 		);
+		ctx.ui.setWidget("pi-sessions", (tui: any, theme: any) => {
+			const requestRender = () => tui.requestRender();
+			parentWidgetRenders.add(requestRender);
+			const widget = new SessionWidget(theme, widgetSnapshot, requestRender);
+			return {
+				render: (width: number) => widget.render(width),
+				invalidate: () => widget.invalidate(),
+				dispose: () => {
+					parentWidgetRenders.delete(requestRender);
+					widget.dispose();
+				},
+			};
+		});
+		broadcastWidgetSnapshot();
 	});
-	pi.on("session_shutdown", () => {
+	pi.on("agent_start", () => {
+		state.parentAgentStatus = "working";
+		broadcastWidgetSnapshot();
+	});
+	pi.on("agent_end", () => {
+		state.parentAgentStatus = "idle";
+		broadcastWidgetSnapshot();
+	});
+	pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
+		ctx.ui.setWidget("pi-sessions", undefined);
+		for (const socket of widgetSubscribers) socket.destroy();
+		widgetSubscribers.clear();
+		parentWidgetRenders.clear();
 		for (const session of sessions.values()) session.pty?.kill("SIGTERM");
 		sessions.clear();
 		try {
