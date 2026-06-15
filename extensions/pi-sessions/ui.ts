@@ -582,6 +582,7 @@ class SessionsView {
 	private loading = true;
 	private error: string | null = null;
 	private closed = false;
+	private initialSelectionSet = false;
 	private readonly filterInput = new Input();
 	private readonly theme: any;
 	private readonly done: () => void;
@@ -616,6 +617,10 @@ class SessionsView {
 			this.error = null;
 			this.sessions = await this.actions.getSessions();
 			computeShortNames(this.sessions);
+			if (!this.initialSelectionSet) {
+				this.selected = this.firstNonCurrentIndex();
+				this.initialSelectionSet = true;
+			}
 			this.clampSelection();
 		} catch (error) {
 			this.error = String(error);
@@ -643,6 +648,18 @@ class SessionsView {
 
 	private selectedSession(): SessionInfo | null {
 		return this.filteredSessions()[this.selected] || null;
+	}
+
+	private isCurrent(session: SessionInfo): boolean {
+		const attached = this.actions.getAttached();
+		if (session.id === PARENT_SESSION_ID) return !attached;
+		return attached === session.name || attached === session.id;
+	}
+
+	private firstNonCurrentIndex(): number {
+		const sessions = this.filteredSessions();
+		const index = sessions.findIndex((session) => !this.isCurrent(session));
+		return index >= 0 ? index : 0;
 	}
 
 	private clampSelection(): void {
