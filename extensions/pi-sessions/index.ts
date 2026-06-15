@@ -479,9 +479,14 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 				resize();
 				process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
 				if (next.replay) process.stdout.write(next.replay);
-				ptyDataDisposable = next.pty.onData((data: string) =>
-					process.stdout.write(data),
-				);
+				// Strip keyboard protocol push/query sequences (CSI >7u, ?u etc.)
+				// from child PTY output so they don't alter the real terminal's
+				// keyboard protocol stack via stdout processing. Otherwise the
+				// child's TUI startup would leave a stale "enabled" state that
+				// later tui.stop() pops restore, leaking release events.
+				ptyDataDisposable = next.pty.onData((data: string) => {
+					process.stdout.write(data.replace(/\x1b\[(>\d+u|\?u)/g, ""));
+				});
 			};
 
 			function refresh() {
