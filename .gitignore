@@ -5,3 +5,4 @@
 /trust.json
 
 /extensions/*/node_modules/
+package-lock.json

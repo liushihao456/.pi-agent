@@ -1,0 +1,9 @@
+{
+  "name": "pi-sessions",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Run and switch between multiple concurrent Pi sessions",
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0"
+  }
+}
