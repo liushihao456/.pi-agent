@@ -6,3 +6,4 @@
 
 /extensions/*/node_modules/
 package-lock.json
+/ayu/

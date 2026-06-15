@@ -227,12 +227,18 @@ export class FileExplorer implements Component, Focusable {
 		this.renderEntries(lines, width);
 		lines.push(this.border(width));
 		lines.push(
-			this.theme.fg(
-				"dim",
-				fits(
-					width,
-					"↑↓/<C-p>/<C-n> move · <tab> enter folder · <enter> choose folder · <M-backspace> parent · <esc> cancel",
-				),
+			fits(
+				width,
+				dim("↑↓/<C-p><C-n>") +
+					muted(" move · ") +
+					dim("<tab>") +
+					muted(" enter folder · ") +
+					dim("<enter>") +
+					muted(" choose folder · ") +
+					dim("<M-backspace>") +
+					muted(" parent · ") +
+					dim("<esc>") +
+					muted(" cancel"),
 			),
 		);
 		return lines;
@@ -591,12 +597,12 @@ class SessionsView {
 			void this.actions.resumeSession().then(() => this.close());
 			return;
 		}
-		if (matchesKey(data, "up")) {
+		if (matchesKey(data, "up") || isCtrl(data, "p")) {
 			this.selected = Math.max(0, this.selected - 1);
 			this.requestRender();
 			return;
 		}
-		if (matchesKey(data, "down")) {
+		if (matchesKey(data, "down") || isCtrl(data, "n")) {
 			this.selected = Math.min(
 				Math.max(0, this.filteredSessions().length - 1),
 				this.selected + 1,
@@ -645,6 +651,7 @@ class SessionsView {
 			th.fg(color, "─".repeat(Math.max(0, width)));
 		const accent = (s: string) => th.fg("accent", s);
 		const dim = (s: string) => th.fg("dim", s);
+		const muted = (s: string) => th.fg("muted", s);
 		const success = (s: string) => th.fg("success", s);
 		const error = (s: string) => th.fg("error", s);
 		const lines: string[] = [];
@@ -674,6 +681,7 @@ class SessionsView {
 		} else {
 			const nameW = 25;
 			const stateW = 9;
+			const cwdW = 36;
 			for (let i = 0; i < visibleSessions.length; i++) {
 				const session = visibleSessions[i]!;
 				const selected = i === this.selected;
@@ -691,19 +699,14 @@ class SessionsView {
 				const styledBase = `${tmp}${dim(current)}`;
 				const styledLeft = padVisible(styledBase, nameW);
 				const state = this.activity(session);
-				const styledState =
-					state === "working"
-						? success(padVisible(state, stateW))
-						: dim(padVisible(state, stateW));
-				const cwd = dim(
+				const styledState = muted(padVisible(state, stateW));
+				const cwd = muted(truncateToWidth(session.cwd || "", cwdW, "…"));
+				const transcript = muted(
 					truncateToWidth(
-						session.cwd || "",
-						Math.max(0, width - nameW - stateW - 24),
+						session.transcript || "",
+						Math.max(0, width - nameW - stateW - cwdW),
 						"…",
 					),
-				);
-				const transcript = dim(
-					truncateToWidth(session.transcript || "", 24, "…"),
 				);
 				lines.push(
 					padVisible(`${styledLeft}${styledState}${cwd}  ${transcript}`, width),
@@ -712,11 +715,20 @@ class SessionsView {
 		}
 		lines.push(border());
 		lines.push(
-			dim(
-				padVisible(
-					"↑↓ move · <enter> switch · <C-o> new in folder · <C-r> resume · <C-k> kill · <esc> close",
-					width,
-				),
+			padVisible(
+				dim("↑/<C-p><C-n>") +
+					muted(" move · ") +
+					dim("<enter>") +
+					muted(" switch · ") +
+					dim("<C-o>") +
+					muted(" new in folder · ") +
+					dim("<C-r>") +
+					muted(" resume · ") +
+					dim("<C-k>") +
+					muted(" kill · ") +
+					dim("<esc>") +
+					muted(" close"),
+				width,
 			),
 		);
 		return lines;

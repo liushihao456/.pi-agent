@@ -45,7 +45,6 @@ type FileEntry = {
 	name: string;
 	path: string;
 	isDirectory: boolean;
-	mode: string;
 	size: string;
 	modified: Date;
 };
@@ -351,20 +350,12 @@ function dirPrefix(value: string): string {
 }
 
 function formatSize(bytes: number): string {
-	if (bytes < 1000) return `${bytes}`;
+	if (bytes < 1000) return `${bytes}b`;
 	if (bytes < 1_000_000)
-		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}k`;
+		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}kb`;
 	if (bytes < 1_000_000_000)
-		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}M`;
-	return `${(bytes / 1_000_000_000).toFixed(1)}G`;
-}
-
-function modeString(mode: number, isDirectory: boolean): string {
-	const type = isDirectory ? "d" : "-";
-	const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
-		.map((bit, index) => (mode & bit ? "rwx"[index % 3] : "-"))
-		.join("");
-	return `${type}${bits}`;
+		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}Mb`;
+	return `${(bytes / 1_000_000_000).toFixed(1)}Gb`;
 }
 
 function relativeTime(date: Date): string {
@@ -399,7 +390,6 @@ function readFileEntries(dir: string): FileEntry[] {
 			name: "./",
 			path: dir,
 			isDirectory: true,
-			mode: "drwxr-xr-x",
 			size: "",
 			modified: new Date(),
 		},
@@ -414,8 +404,7 @@ function readFileEntries(dir: string): FileEntry[] {
 				name: `${dirent.name}${isDirectory ? "/" : ""}`,
 				path: entryPath,
 				isDirectory,
-				mode: modeString(stat.mode, isDirectory),
-				size: formatSize(stat.size),
+				size: isDirectory ? "" : formatSize(stat.size),
 				modified: stat.mtime,
 			});
 		} catch {
@@ -458,12 +447,18 @@ class FileExplorer implements Component, Focusable {
 		this.renderEntries(lines, width);
 		lines.push(this.border(width));
 		lines.push(
-			this.theme.fg(
-				"dim",
-				fits(
-					width,
-					"↑↓/<C-p>/<C-n> move · <tab> enter folder · <enter> open · <M-backspace> parent · <esc> cancel",
-				),
+			fits(
+				width,
+				this.theme.fg("dim", "↑↓/<C-p>/<C-n>") +
+					this.theme.fg("muted", " move · ") +
+					this.theme.fg("dim", "<tab>") +
+					this.theme.fg("muted", " enter folder · ") +
+					this.theme.fg("dim", "<enter>") +
+					this.theme.fg("muted", " open · ") +
+					this.theme.fg("dim", "<M-backspace>") +
+					this.theme.fg("muted", " parent · ") +
+					this.theme.fg("dim", "<esc>") +
+					this.theme.fg("muted", " cancel"),
 			),
 		);
 		return lines;
@@ -605,8 +600,12 @@ class FileExplorer implements Component, Focusable {
 	): string {
 		if (entry.name === "./") return this.currentDirLine(width, options);
 		const left = `${options.selected ? "›" : " "} ${entry.name}`;
-		const meta = `${entry.mode}  ${entry.size.padStart(5)}  ${relativeTime(entry.modified)}`;
-		const metaWidth = Math.min(38, Math.max(0, Math.floor(width * 0.48)));
+		const timeW = 7;
+		const meta = `${entry.size.padStart(5)}  ${relativeTime(entry.modified).padStart(timeW)}`;
+		const metaWidth = Math.min(
+			5 + 2 + timeW,
+			Math.max(0, Math.floor(width * 0.38)),
+		);
 		const renderedMeta = fits(metaWidth, meta);
 		const renderedLeft = fits(
 			Math.max(0, width - visibleWidth(renderedMeta) - 1),
@@ -724,9 +723,14 @@ class ProjectFilePicker implements Component, Focusable {
 		this.renderFiles(lines, width, filtered);
 		lines.push(this.border(width));
 		lines.push(
-			this.theme.fg(
-				"dim",
-				fits(width, "↑↓/<C-p>/<C-n> move · <enter> open · <esc> cancel"),
+			fits(
+				width,
+				this.theme.fg("dim", "↑↓/<C-p>/<C-n>") +
+					this.theme.fg("muted", " move · ") +
+					this.theme.fg("dim", "<enter>") +
+					this.theme.fg("muted", " open · ") +
+					this.theme.fg("dim", "<esc>") +
+					this.theme.fg("muted", " cancel"),
 			),
 		);
 		return lines;

@@ -162,27 +162,18 @@ function dirPrefix(value: string): string {
 }
 
 function formatSize(bytes: number): string {
-	if (bytes < 1000) return `${bytes}`;
+	if (bytes < 1000) return `${bytes}b`;
 	if (bytes < 1_000_000)
-		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}k`;
+		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}kb`;
 	if (bytes < 1_000_000_000)
-		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}M`;
-	return `${(bytes / 1_000_000_000).toFixed(1)}G`;
-}
-
-function modeString(mode: number, isDirectory: boolean): string {
-	const type = isDirectory ? "d" : "-";
-	const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
-		.map((bit, index) => (mode & bit ? "rwx"[index % 3] : "-"))
-		.join("");
-	return `${type}${bits}`;
+		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}Mb`;
+	return `${(bytes / 1_000_000_000).toFixed(1)}Gb`;
 }
 
 type FileEntry = {
 	name: string;
 	path: string;
 	isDirectory: boolean;
-	mode: string;
 	size: string;
 	modified: Date;
 };
@@ -193,7 +184,6 @@ function readFileEntries(dir: string): FileEntry[] {
 			name: "./",
 			path: dir,
 			isDirectory: true,
-			mode: "drwxr-xr-x",
 			size: "",
 			modified: new Date(),
 		},
@@ -208,8 +198,7 @@ function readFileEntries(dir: string): FileEntry[] {
 				name: `${dirent.name}${isDirectory ? "/" : ""}`,
 				path: entryPath,
 				isDirectory,
-				mode: modeString(stat.mode, isDirectory),
-				size: formatSize(stat.size),
+				size: isDirectory ? "" : formatSize(stat.size),
 				modified: stat.mtime,
 			});
 		} catch {
@@ -391,11 +380,27 @@ class ProjectSessionPicker implements Component, Focusable {
 	}
 
 	private footer(width: number): string {
-		const text =
+		const parts =
 			this.mode === MODE_PROJECTS
-				? "↑↓/<C-p>/<C-n> move · type search · <enter> choose · <C-o> open new folder · <esc> cancel"
-				: "↑↓/<C-p>/<C-n> move · type search · <enter> switch · <C-o> new session · <esc> back";
-		return this.theme.fg("dim", fits(width, text));
+				? this.theme.fg("dim", "↑↓/<C-p>/<C-n>") +
+					this.theme.fg("muted", " move · ") +
+					this.theme.fg("muted", "type search · ") +
+					this.theme.fg("dim", "<enter>") +
+					this.theme.fg("muted", " choose · ") +
+					this.theme.fg("dim", "<C-o>") +
+					this.theme.fg("muted", " open new folder · ") +
+					this.theme.fg("dim", "<esc>") +
+					this.theme.fg("muted", " cancel")
+				: this.theme.fg("dim", "↑↓/<C-p>/<C-n>") +
+					this.theme.fg("muted", " move · ") +
+					this.theme.fg("muted", "type search · ") +
+					this.theme.fg("dim", "<enter>") +
+					this.theme.fg("muted", " switch · ") +
+					this.theme.fg("dim", "<C-o>") +
+					this.theme.fg("muted", " new session · ") +
+					this.theme.fg("dim", "<esc>") +
+					this.theme.fg("muted", " back");
+		return fits(width, parts);
 	}
 
 	private itemLine(
@@ -403,7 +408,35 @@ class ProjectSessionPicker implements Component, Focusable {
 		left: string,
 		right: string,
 		options: { selected: boolean },
+		middle?: string,
 	): string {
+		if (middle) {
+			const nameW = 25;
+			const cwdW = 36;
+			const renderedLeft = fits(nameW, left);
+			const leftPad = " ".repeat(
+				Math.max(0, nameW - visibleWidth(renderedLeft)),
+			);
+			const paddedLeft = renderedLeft + leftPad;
+			const renderedMiddle = fits(cwdW, middle);
+			const middlePad = " ".repeat(
+				Math.max(0, cwdW - visibleWidth(renderedMiddle)),
+			);
+			const paddedMiddle = renderedMiddle + middlePad;
+			const rightW = Math.min(
+				visibleWidth(right),
+				Math.max(0, width - nameW - cwdW),
+			);
+			const renderedRight = fits(rightW, right);
+			const gap = " ".repeat(
+				Math.max(1, width - nameW - cwdW - visibleWidth(renderedRight)),
+			);
+			const styledLeft = options.selected
+				? this.theme.fg("accent", paddedLeft)
+				: paddedLeft;
+			const styledMiddle = this.theme.fg("muted", paddedMiddle);
+			return `${styledLeft}${styledMiddle}${gap}${this.theme.fg("dim", renderedRight)}`;
+		}
 		const rightWidth = Math.min(
 			visibleWidth(right),
 			Math.max(0, Math.floor(width * 0.55)),
@@ -413,16 +446,10 @@ class ProjectSessionPicker implements Component, Focusable {
 			Math.max(0, width - visibleWidth(renderedRight) - 1),
 			left,
 		);
-		const gap = " ".repeat(
-			Math.max(
-				1,
-				width - visibleWidth(renderedLeft) - visibleWidth(renderedRight),
-			),
-		);
 		const styledLeft = options.selected
 			? this.theme.fg("accent", renderedLeft)
 			: renderedLeft;
-		return `${styledLeft}${gap}${this.theme.fg("dim", renderedRight)}`;
+		return `${styledLeft} ${this.theme.fg("dim", renderedRight)}`;
 	}
 
 	private renderProjects(lines: string[], width: number): void {
@@ -486,8 +513,9 @@ class ProjectSessionPicker implements Component, Focusable {
 			return this.itemLine(
 				width,
 				`${selected ? "›" : " "} + Open New Folder…`,
-				"create new session from directory path",
+				"",
 				{ selected },
+				"create new session from directory",
 			);
 		}
 
@@ -495,8 +523,9 @@ class ProjectSessionPicker implements Component, Focusable {
 		const selected = index === this.selectedProjectIndex;
 		const marker = selected ? "›" : " ";
 		const title = `${marker} ${project.name}`;
-		const meta = `${project.displayPath} · ${project.sessions.length} session${project.sessions.length === 1 ? "" : "s"} · ${relativeTime(project.modified)}`;
-		return this.itemLine(width, title, meta, { selected });
+		const cwd = project.displayPath;
+		const tail = `${project.sessions.length} session${project.sessions.length === 1 ? "" : "s"} · ${relativeTime(project.modified)}`;
+		return this.itemLine(width, title, tail, { selected }, cwd);
 	}
 
 	private sessionRow(
@@ -653,12 +682,18 @@ class FileExplorer implements Component, Focusable {
 		this.renderEntries(lines, width);
 		lines.push(this.border(width));
 		lines.push(
-			this.theme.fg(
-				"dim",
-				fits(
-					width,
-					"↑↓/<C-p>/<C-n> move · <tab> enter folder · <enter> choose folder · <M-backspace> parent · <esc> cancel",
-				),
+			fits(
+				width,
+				this.theme.fg("dim", "↑↓/<C-p>/<C-n>") +
+					this.theme.fg("muted", " move · ") +
+					this.theme.fg("dim", "<tab>") +
+					this.theme.fg("muted", " enter folder · ") +
+					this.theme.fg("dim", "<enter>") +
+					this.theme.fg("muted", " choose folder · ") +
+					this.theme.fg("dim", "<M-backspace>") +
+					this.theme.fg("muted", " parent · ") +
+					this.theme.fg("dim", "<esc>") +
+					this.theme.fg("muted", " cancel"),
 			),
 		);
 		return lines;
@@ -804,8 +839,12 @@ class FileExplorer implements Component, Focusable {
 	): string {
 		if (entry.name === "./") return this.currentDirLine(width, options);
 		const left = `${options.selected ? "›" : " "} ${entry.name}`;
-		const meta = `${entry.mode}  ${entry.size.padStart(5)}  ${relativeTime(entry.modified)}`;
-		const metaWidth = Math.min(38, Math.max(0, Math.floor(width * 0.48)));
+		const timeW = 7;
+		const meta = `${entry.size.padStart(5)}  ${relativeTime(entry.modified).padStart(timeW)}`;
+		const metaWidth = Math.min(
+			5 + 2 + timeW,
+			Math.max(0, Math.floor(width * 0.38)),
+		);
 		const renderedMeta = fits(metaWidth, meta);
 		const renderedLeft = fits(
 			Math.max(0, width - visibleWidth(renderedMeta) - 1),
