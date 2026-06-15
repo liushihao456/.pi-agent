@@ -479,13 +479,13 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 				resize();
 				process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
 				if (next.replay) process.stdout.write(next.replay);
-				// Strip keyboard protocol push/query sequences (CSI >7u, ?u etc.)
+				// Strip keyboard protocol push/query sequences (CSI >7u, ?u, >4;2m)
 				// from child PTY output so they don't alter the real terminal's
-				// keyboard protocol stack via stdout processing. Otherwise the
-				// child's TUI startup would leave a stale "enabled" state that
-				// later tui.stop() pops restore, leaking release events.
+				// keyboard state via stdout processing. Without this, the child's
+				// TUI startup would leave Kitty and modifyOtherKeys enabled on the
+				// real terminal, leaking release events and garbled keys later.
 				ptyDataDisposable = next.pty.onData((data: string) => {
-					process.stdout.write(data.replace(/\x1b\[(>\d+u|\?u)/g, ""));
+					process.stdout.write(data.replace(/\x1b\[(>\d+u|>4;\dm|\?u)/g, ""));
 				});
 			};
 
