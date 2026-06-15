@@ -28,7 +28,7 @@ type SessionInfo = {
 	shortName?: string;
 };
 
-type PanelActions = {
+type SessionsActions = {
 	getSessions: () => Promise<SessionInfo[]>;
 	getAttached: () => string | null;
 	getCwd: () => string;
@@ -480,7 +480,7 @@ export class FileExplorer implements Component, Focusable {
 	}
 }
 
-class SessionsPanel {
+class SessionsView {
 	private sessions: SessionInfo[] = [];
 	private selected = 0;
 	private loading = true;
@@ -489,7 +489,7 @@ class SessionsPanel {
 	private readonly filterInput = new Input();
 	private readonly theme: any;
 	private readonly done: () => void;
-	private readonly actions: PanelActions;
+	private readonly actions: SessionsActions;
 	private readonly requestRender: () => void;
 	private folderExplorer: FileExplorer | null = null;
 	private timer: NodeJS.Timeout | null = null;
@@ -497,7 +497,7 @@ class SessionsPanel {
 	constructor(
 		theme: any,
 		done: () => void,
-		actions: PanelActions,
+		actions: SessionsActions,
 		requestRender: () => void,
 	) {
 		this.theme = theme;
@@ -732,12 +732,12 @@ class SessionsPanel {
 	}
 }
 
-export async function showSessionsPanel(
+export async function showSessionsView(
 	ctx: any,
-	actions: PanelActions,
+	actions: SessionsActions,
 ): Promise<void> {
 	await ctx.ui.custom(
 		(tui: any, theme: any, _keybindings: any, done: () => void) =>
-			new SessionsPanel(theme, done, actions, () => tui.requestRender()),
+			new SessionsView(theme, done, actions, () => tui.requestRender()),
 	);
 }

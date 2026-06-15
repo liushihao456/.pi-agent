@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pty from "@homebridge/node-pty-prebuilt-multiarch";
-import { showSessionsPanel } from "./ui.ts";
+import { showSessionsView } from "./ui.ts";
 
 function readFirstMessage(filePath: string): string {
 	try {
@@ -69,15 +69,6 @@ const state = { parentCwd: process.cwd(), parentTranscript: "" };
 
 const PARENT_SESSION_ID = "__parent__";
 
-function parseArgs(args: string): string[] {
-	const out: string[] = [];
-	const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-	let match: RegExpExecArray | null;
-	while ((match = re.exec(args)))
-		out.push(match[1] ?? match[2] ?? match[3] ?? "");
-	return out;
-}
-
 function sanitizeName(name: string): string {
 	return (
 		String(name || "")
@@ -124,14 +115,6 @@ function publicSession(s: any): SessionInfo {
 		rows: s.rows,
 		transcript: s.transcript || "",
 	};
-}
-
-function formatSession(s: SessionInfo): string {
-	const active =
-		attachedSession && (attachedSession === s.name || attachedSession === s.id)
-			? "*"
-			: " ";
-	return `${active} ${s.name.padEnd(16)} ${String(s.state).padEnd(10)} pid:${s.pid ?? "?"} ${s.status || ""}`;
 }
 
 function notifySession(s: any): void {
@@ -444,18 +427,6 @@ async function selectorSessions(ctx: CommandContext): Promise<SessionInfo[]> {
 	];
 }
 
-async function showList(ctx: CommandContext): Promise<void> {
-	const items = await listSessions();
-	if (!items.length) {
-		ctx.ui.notify("No pi-sessions child processes.", "info");
-		return;
-	}
-	ctx.ui.notify(
-		["pi-sessions", ...items.map(formatSession)].join("\n"),
-		"info",
-	);
-}
-
 function disposePtyData(disposable: any): void {
 	try {
 		if (typeof disposable === "function") disposable();
@@ -569,8 +540,8 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 	ctx.ui.notify("Detached from pi-sessions child.", "info");
 }
 
-async function openPanel(ctx: CommandContext): Promise<void> {
-	await showSessionsPanel(ctx, {
+async function openSessions(ctx: CommandContext): Promise<void> {
+	await showSessionsView(ctx, {
 		getSessions: () => selectorSessions(ctx),
 		getAttached: () => attachedSession,
 		getCwd: () => ctx.cwd || process.cwd(),
@@ -618,8 +589,8 @@ async function openPanel(ctx: CommandContext): Promise<void> {
 	});
 }
 
-async function openChildPanel(ctx: CommandContext): Promise<void> {
-	await showSessionsPanel(ctx, {
+async function openChildSessions(ctx: CommandContext): Promise<void> {
+	await showSessionsView(ctx, {
 		getSessions: async () => {
 			const [data, cwdData] = await Promise.all([
 				bridgeCall("listSessions"),
@@ -685,115 +656,6 @@ async function openChildPanel(ctx: CommandContext): Promise<void> {
 	});
 }
 
-async function handleParentCommand(
-	sub: string,
-	args: string,
-	ctx: CommandContext,
-): Promise<void> {
-	const rest = parseArgs(args || "");
-	switch (sub) {
-		case "new": {
-			const name = rest[0] || `session-${Date.now().toString(36)}`;
-			const session = createSession({ name, cwd: ctx.cwd });
-			ctx.ui.notify(
-				`Started pi session ${session.name} (pid ${session.pid ?? "?"})`,
-				"info",
-			);
-			break;
-		}
-		case "resume": {
-			const name = rest[0] || `session-${Date.now().toString(36)}`;
-			const session = createSession({ name, cwd: ctx.cwd, resume: true });
-			ctx.ui.notify(
-				`Started resumable pi session ${session.name} (pid ${session.pid ?? "?"})`,
-				"info",
-			);
-			await attachSession(ctx, session.name);
-			break;
-		}
-		case "list":
-			await showList(ctx);
-			break;
-		case "panel":
-			await openPanel(ctx);
-			break;
-		case "attach":
-		case "switch": {
-			const name = rest[0] || attachedSession;
-			if (!name) throw new Error(`Usage: /sessions:${sub} <name>`);
-			await attachSession(ctx, name);
-			break;
-		}
-		case "detach":
-			attachedSession = null;
-			ctx.ui.notify("No attached pi-sessions child in parent view.", "info");
-			break;
-		case "stop":
-		case "kill": {
-			const name = rest[0] || attachedSession;
-			if (!name) throw new Error(`Usage: /sessions:${sub} <name>`);
-			stopSession(name);
-			ctx.ui.notify(`Killed ${name}`, "warning");
-			break;
-		}
-		default:
-			throw new Error(`Unknown pi-sessions command: ${sub}`);
-	}
-}
-
-async function handleChildCommand(
-	sub: string,
-	args: string,
-	ctx: CommandContext,
-): Promise<void> {
-	const rest = parseArgs(args || "");
-	switch (sub) {
-		case "switch": {
-			const target = rest[0];
-			if (!target) throw new Error("Usage: /sessions:switch <name>");
-			await bridgeCall("switch", {
-				target,
-				from: process.env.PI_SESSIONS_SESSION_NAME,
-			});
-			ctx.ui.notify(`Requested parent switch to ${target}`, "info");
-			break;
-		}
-		case "detach":
-			await bridgeCall("detach", {
-				from: process.env.PI_SESSIONS_SESSION_NAME,
-			});
-			ctx.ui.notify("Requested parent detach", "info");
-			break;
-		case "list": {
-			const data = await bridgeCall("listSessions");
-			ctx.ui.notify(
-				["pi-sessions", ...(data.sessions || []).map(formatSession)].join("\n"),
-				"info",
-			);
-			break;
-		}
-		default:
-			throw new Error(
-				`Child pi-sessions supports /sessions:switch, /sessions:detach, /sessions:list only (got ${sub})`,
-			);
-	}
-}
-
-function registerSessionsCommand(
-	pi: ExtensionAPI,
-	sub: string,
-	description: string,
-	childMode: boolean,
-) {
-	pi.registerCommand(`sessions:${sub}`, {
-		description,
-		handler: async (args: string, ctx: CommandContext) =>
-			childMode
-				? handleChildCommand(sub, args, ctx)
-				: handleParentCommand(sub, args, ctx),
-	});
-}
-
 export default function (pi: ExtensionAPI) {
 	const childMode = process.env.PI_SESSIONS_CHILD === "1";
 
@@ -801,26 +663,8 @@ export default function (pi: ExtensionAPI) {
 		pi.registerCommand("sessions", {
 			description: "Open the parent pi-sessions switcher",
 			handler: async (_args: string, ctx: CommandContext) =>
-				openChildPanel(ctx),
+				openChildSessions(ctx),
 		});
-		registerSessionsCommand(
-			pi,
-			"switch",
-			"Ask parent pi-sessions to switch attached child",
-			true,
-		);
-		registerSessionsCommand(
-			pi,
-			"detach",
-			"Ask parent pi-sessions to detach this child",
-			true,
-		);
-		registerSessionsCommand(
-			pi,
-			"list",
-			"List parent pi-sessions children",
-			true,
-		);
 		pi.on("session_start", (_event: any, ctx: CommandContext) => {
 			const transcript = resolveTranscriptName(
 				ctx.sessionManager?.getSessionName?.(),
@@ -871,46 +715,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("sessions", {
 		description: "Open the pi-sessions switcher",
-		handler: async (_args: string, ctx: CommandContext) => openPanel(ctx),
+		handler: async (_args: string, ctx: CommandContext) => openSessions(ctx),
 	});
 
-	registerSessionsCommand(
-		pi,
-		"new",
-		"Start a complete Pi TUI child process",
-		false,
-	);
-	registerSessionsCommand(
-		pi,
-		"resume",
-		"Start a child Pi with the built-in resume selector",
-		false,
-	);
-	registerSessionsCommand(pi, "list", "List Pi TUI child processes", false);
-	registerSessionsCommand(
-		pi,
-		"panel",
-		"Open the pi-sessions control panel",
-		false,
-	);
-	registerSessionsCommand(
-		pi,
-		"attach",
-		"Attach to a Pi TUI child process",
-		false,
-	);
-	registerSessionsCommand(
-		pi,
-		"switch",
-		"Switch attached view to a Pi TUI child process",
-		false,
-	);
-	registerSessionsCommand(
-		pi,
-		"detach",
-		"Detach from a Pi TUI child process",
-		false,
-	);
-	registerSessionsCommand(pi, "stop", "Kill a Pi TUI child process", false);
-	registerSessionsCommand(pi, "kill", "Kill a Pi TUI child process", false);
 }
