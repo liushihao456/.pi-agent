@@ -746,7 +746,6 @@ class SessionsView {
 	}
 
 	private activity(session: SessionInfo): string {
-		if (session.id === PARENT_SESSION_ID) return "idle";
 		return session.agentStatus || "idle";
 	}
 

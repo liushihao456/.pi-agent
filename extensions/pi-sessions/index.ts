@@ -408,6 +408,7 @@ function handleBridgeRequest(req: any): any {
 			return {
 				cwd: state.parentCwd,
 				parentTranscript: state.parentTranscript || "",
+				parentAgentStatus: state.parentAgentStatus || "idle",
 			};
 		case "statusUpdate": {
 			const target = findSession(req.sessionName || req.sessionId);
@@ -518,6 +519,7 @@ async function selectorSessions(ctx: CommandContext): Promise<SessionInfo[]> {
 			status: "parent",
 			pid: process.pid,
 			lastActivityAt: 0,
+			agentStatus: state.parentAgentStatus || "idle",
 			transcript: resolveTranscriptName(
 				ctx.sessionManager?.getSessionName?.(),
 				ctx.sessionManager?.getSessionFile?.(),
@@ -696,6 +698,7 @@ async function openChildSessions(ctx: CommandContext): Promise<void> {
 					status: "parent",
 					pid: null,
 					lastActivityAt: 0,
+					agentStatus: cwdData.parentAgentStatus || "idle",
 					transcript: cwdData.parentTranscript || "",
 				},
 				...(data.sessions || []),
