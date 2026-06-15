@@ -205,6 +205,11 @@ function createSession(opts: {
 		s.status = s.expectedStop
 			? "stopped"
 			: `exited ${exitCode}${signal ? ` ${signal}` : ""}`;
+		if (attachedSession === s.name || attachedSession === s.id) {
+			attachedSession = null;
+			for (const session of sessions.values()) notifySession(session);
+			return;
+		}
 		notifySession(s);
 	});
 	return publicSession(s);
