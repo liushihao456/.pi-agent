@@ -131,27 +131,18 @@ function dirPrefix(value: string): string {
 }
 
 function formatSize(bytes: number): string {
-	if (bytes < 1000) return `${bytes}`;
+	if (bytes < 1000) return `${bytes}b`;
 	if (bytes < 1_000_000)
-		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}k`;
+		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}kb`;
 	if (bytes < 1_000_000_000)
-		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}M`;
-	return `${(bytes / 1_000_000_000).toFixed(1)}G`;
-}
-
-function modeString(mode: number, isDirectory: boolean): string {
-	const type = isDirectory ? "d" : "-";
-	const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
-		.map((bit, index) => (mode & bit ? "rwx"[index % 3] : "-"))
-		.join("");
-	return `${type}${bits}`;
+		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}Mb`;
+	return `${(bytes / 1_000_000_000).toFixed(1)}Gb`;
 }
 
 type FileEntry = {
 	name: string;
 	path: string;
 	isDirectory: boolean;
-	mode: string;
 	size: string;
 	modified: Date;
 };
@@ -162,7 +153,6 @@ function readFileEntries(dir: string): FileEntry[] {
 			name: "./",
 			path: dir,
 			isDirectory: true,
-			mode: "drwxr-xr-x",
 			size: "",
 			modified: new Date(),
 		},
@@ -177,8 +167,7 @@ function readFileEntries(dir: string): FileEntry[] {
 				name: `${dirent.name}${isDirectory ? "/" : ""}`,
 				path: entryPath,
 				isDirectory,
-				mode: modeString(stat.mode, isDirectory),
-				size: formatSize(stat.size),
+				size: isDirectory ? "" : formatSize(stat.size),
 				modified: stat.mtime,
 			});
 		} catch {
@@ -220,6 +209,8 @@ export class FileExplorer implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		const dim = (s: string) => this.theme.fg("dim", s);
+		const muted = (s: string) => this.theme.fg("muted", s);
 		const lines: string[] = [];
 		lines.push(this.border(width));
 		lines.push(this.header(width));
@@ -229,7 +220,7 @@ export class FileExplorer implements Component, Focusable {
 		lines.push(
 			fits(
 				width,
-				dim("↑↓/<C-p><C-n>") +
+				dim("↑↓/<C-p>/<C-n>") +
 					muted(" move · ") +
 					dim("<tab>") +
 					muted(" enter folder · ") +
@@ -333,7 +324,7 @@ export class FileExplorer implements Component, Focusable {
 		const entries = this.filteredEntries();
 		const total = Math.max(1, entries.length);
 		const index = Math.min(this.selectedIndex + 1, total);
-		const prefix = `${index}/${total}\tFind folder: `;
+		const prefix = `${index}/${total}\tOpen session in folder: `;
 		const input = renderInputChild(
 			this.searchInput,
 			Math.max(1, width - visibleWidth(prefix)),
@@ -384,8 +375,12 @@ export class FileExplorer implements Component, Focusable {
 	): string {
 		if (entry.name === "./") return this.currentDirLine(width, options);
 		const left = `${options.selected ? "›" : " "} ${entry.name}`;
-		const meta = `${entry.mode}  ${entry.size.padStart(5)}  ${relativeTime(entry.modified)}`;
-		const metaWidth = Math.min(38, Math.max(0, Math.floor(width * 0.48)));
+		const timeW = 7;
+		const meta = `${entry.size.padStart(5)}  ${relativeTime(entry.modified).padStart(timeW)}`;
+		const metaWidth = Math.min(
+			5 + 2 + timeW,
+			Math.max(0, Math.floor(width * 0.38)),
+		);
 		const renderedMeta = fits(metaWidth, meta);
 		const renderedLeft = fits(
 			Math.max(0, width - visibleWidth(renderedMeta) - 1),

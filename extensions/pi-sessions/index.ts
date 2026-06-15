@@ -648,6 +648,10 @@ export default function (pi: ExtensionAPI) {
 			handler: async (_args: string, ctx: CommandContext) =>
 				openChildSessions(ctx),
 		});
+		pi.registerShortcut("ctrl+r", {
+			description: "Open sessions switcher",
+			handler: async (ctx: CommandContext) => openChildSessions(ctx),
+		});
 		pi.on("session_start", (_event: any, ctx: CommandContext) => {
 			const transcript = resolveTranscriptName(
 				ctx.sessionManager?.getSessionName?.(),
@@ -698,5 +702,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("sessions", {
 		description: "Open the pi-sessions switcher",
 		handler: async (_args: string, ctx: CommandContext) => openSessions(ctx),
+	});
+
+	pi.registerShortcut("ctrl+r", {
+		description: "Open sessions switcher",
+		handler: async (ctx: CommandContext) => openSessions(ctx),
 	});
 }

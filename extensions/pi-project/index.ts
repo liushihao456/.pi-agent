@@ -788,7 +788,7 @@ class FileExplorer implements Component, Focusable {
 		const entries = this.filteredEntries();
 		const total = Math.max(1, entries.length);
 		const index = Math.min(this.selectedIndex + 1, total);
-		const prefix = `${index}/${total}\tFind folder: `;
+		const prefix = `${index}/${total}\tOpen session in folder: `;
 		const input = renderInputChild(
 			this.searchInput,
 			Math.max(1, width - visibleWidth(prefix)),
