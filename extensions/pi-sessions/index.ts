@@ -434,28 +434,6 @@ function disposePtyData(disposable: any): void {
 	} catch {}
 }
 
-function resetTerminalModes(): void {
-	process.stdout.write(
-		[
-			"\x1b[<u",
-			"\x1b[?2004l",
-			"\x1b[?1006l",
-			"\x1b[?1004l",
-			"\x1b[?1003l",
-			"\x1b[?1002l",
-			"\x1b[?1000l",
-			"\x1b[?1049l",
-			"\x1b[?1048l",
-			"\x1b[?1047l",
-			"\x1b[?47l",
-			"\x1b[?25h",
-			"\x1b>",
-			"\x1b[?1l",
-			"\x1b[0m",
-		].join(""),
-	);
-}
-
 async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 	const first = findSession(name);
 	if (!first) throw new Error(`session not found: ${name}`);
@@ -704,7 +682,6 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 	pi.on("session_shutdown", () => {
-		resetTerminalModes();
 		for (const session of sessions.values()) session.pty?.kill("SIGTERM");
 		sessions.clear();
 		try {
@@ -717,5 +694,4 @@ export default function (pi: ExtensionAPI) {
 		description: "Open the pi-sessions switcher",
 		handler: async (_args: string, ctx: CommandContext) => openSessions(ctx),
 	});
-
 }
