@@ -1,10 +1,18 @@
 // @ts-nocheck
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+	fuzzyFilter,
+	getKeybindings,
 	Input,
 	Key,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
+	type Component,
+	type Focusable,
 } from "@earendil-works/pi-tui";
 
 type SessionInfo = {
@@ -23,8 +31,10 @@ type SessionInfo = {
 type PanelActions = {
 	getSessions: () => Promise<SessionInfo[]>;
 	getAttached: () => string | null;
+	getCwd: () => string;
 	switchTo: (name: string) => Promise<void>;
 	newSession: () => Promise<void>;
+	newSessionInFolder: (cwd: string) => Promise<void>;
 	resumeSession: () => Promise<void>;
 	killSession: (name: string) => Promise<void>;
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
@@ -63,6 +73,413 @@ function computeShortNames(sessions: SessionInfo[]): void {
 	}
 }
 
+// --- FileExplorer (from pi-project) ---
+
+const FILE_EXPLORER_MAX_VISIBLE = 8;
+
+function expandHome(input: string): string {
+	if (input === "~") return homedir();
+	if (input.startsWith("~/")) return path.join(homedir(), input.slice(2));
+	return input;
+}
+
+function normalizeExistingDir(input: string): string | null {
+	try {
+		const expanded = expandHome(input.trim());
+		if (!expanded) return null;
+		const absolute = path.resolve(expanded);
+		if (!existsSync(absolute)) return null;
+		if (!statSync(absolute).isDirectory()) return null;
+		return absolute;
+	} catch {
+		return null;
+	}
+}
+
+function relativeTime(date: Date): string {
+	const ms = Date.now() - date.getTime();
+	if (!Number.isFinite(ms) || ms < 0) return "now";
+	const sec = Math.floor(ms / 1000);
+	if (sec < 60) return "now";
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m ago`;
+	const hour = Math.floor(min / 60);
+	if (hour < 24) return `${hour}h ago`;
+	const day = Math.floor(hour / 24);
+	if (day < 30) return `${day}d ago`;
+	const month = Math.floor(day / 30);
+	if (month < 12) return `${month}mo ago`;
+	return `${Math.floor(month / 12)}y ago`;
+}
+
+function fits(width: number, text: string): string {
+	return truncateToWidth(text, Math.max(0, width), "…");
+}
+
+function indent(width: number, text: string): string {
+	return fits(width, `  ${text}`);
+}
+
+function setInputValueAtEnd(input: Input, value: string): void {
+	input.setValue(value);
+	(input as unknown as { cursor: number }).cursor = value.length;
+}
+
+function dirPrefix(value: string): string {
+	const slash = value.lastIndexOf("/");
+	return slash >= 0 ? value.slice(0, slash + 1) : "";
+}
+
+function formatSize(bytes: number): string {
+	if (bytes < 1000) return `${bytes}`;
+	if (bytes < 1_000_000)
+		return `${(bytes / 1000).toFixed(bytes < 10_000 ? 1 : 0)}k`;
+	if (bytes < 1_000_000_000)
+		return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)}M`;
+	return `${(bytes / 1_000_000_000).toFixed(1)}G`;
+}
+
+function modeString(mode: number, isDirectory: boolean): string {
+	const type = isDirectory ? "d" : "-";
+	const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
+		.map((bit, index) => (mode & bit ? "rwx"[index % 3] : "-"))
+		.join("");
+	return `${type}${bits}`;
+}
+
+type FileEntry = {
+	name: string;
+	path: string;
+	isDirectory: boolean;
+	mode: string;
+	size: string;
+	modified: Date;
+};
+
+function readFileEntries(dir: string): FileEntry[] {
+	const entries: FileEntry[] = [
+		{
+			name: "./",
+			path: dir,
+			isDirectory: true,
+			mode: "drwxr-xr-x",
+			size: "",
+			modified: new Date(),
+		},
+	];
+
+	for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+		try {
+			const entryPath = path.join(dir, dirent.name);
+			const stat = statSync(entryPath);
+			const isDirectory = stat.isDirectory();
+			entries.push({
+				name: `${dirent.name}${isDirectory ? "/" : ""}`,
+				path: entryPath,
+				isDirectory,
+				mode: modeString(stat.mode, isDirectory),
+				size: formatSize(stat.size),
+				modified: stat.mtime,
+			});
+		} catch {
+			// Ignore unreadable entries.
+		}
+	}
+
+	return entries.sort((a, b) => {
+		if (a.name === "./") return -1;
+		if (b.name === "./") return 1;
+		if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+export class FileExplorer implements Component, Focusable {
+	private entries: FileEntry[] = [];
+	private selectedIndex = 0;
+	private readonly searchInput = new Input();
+	private error: string | undefined;
+	private readonly theme: Theme;
+	private readonly done: (path: string | null) => void;
+	private readonly requestRender: () => void;
+
+	constructor(
+		initialCwd: string,
+		theme: Theme,
+		done: (path: string | null) => void,
+		requestRender: () => void,
+	) {
+		setInputValueAtEnd(
+			this.searchInput,
+			`${normalizeExistingDir(initialCwd) ?? homedir()}/`,
+		);
+		this.theme = theme;
+		this.done = done;
+		this.requestRender = requestRender;
+		this.refresh();
+	}
+
+	render(width: number): string[] {
+		const lines: string[] = [];
+		lines.push(this.border(width));
+		lines.push(this.header(width));
+		lines.push(this.border(width, "dim"));
+		this.renderEntries(lines, width);
+		lines.push(this.border(width));
+		lines.push(
+			this.theme.fg(
+				"dim",
+				fits(
+					width,
+					"↑↓/<C-p>/<C-n> move · <tab> enter folder · <enter> choose folder · <M-backspace> parent · <esc> cancel",
+				),
+			),
+		);
+		return lines;
+	}
+
+	get focused(): boolean {
+		return this.searchInput.focused;
+	}
+
+	set focused(value: boolean) {
+		this.searchInput.focused = value;
+	}
+
+	invalidate(): void {
+		this.searchInput.invalidate();
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.escape)) {
+			this.done(null);
+			return;
+		}
+		if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
+			this.move(-1);
+			return;
+		}
+		if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
+			this.move(1);
+			return;
+		}
+		if (matchesKey(data, Key.tab)) {
+			this.enterSelectedDirectory();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			this.chooseSelectedDirectory();
+			return;
+		}
+		if (getKeybindings().matches(data, "tui.editor.deleteWordBackward")) {
+			this.deletePathSegmentBackward();
+			return;
+		}
+
+		const before = this.search;
+		const beforeDir = dirPrefix(before);
+		this.searchInput.handleInput(data);
+		const after = this.search;
+		if (after !== before) {
+			if (dirPrefix(after) !== beforeDir) this.refresh();
+			else this.clampSelection();
+		}
+		this.requestRender();
+	}
+
+	private get search(): string {
+		return this.searchInput.getValue();
+	}
+
+	private set search(value: string) {
+		setInputValueAtEnd(this.searchInput, value);
+	}
+
+	private deletePathSegmentBackward(): void {
+		const before = this.search;
+		const trimmed = before.replace(/\/+$/, "");
+		const slash = trimmed.lastIndexOf("/");
+		if (slash < 0) return;
+		const next = trimmed.slice(0, slash + 1);
+		if (next === before) return;
+		this.search = next || "/";
+		this.refresh();
+		this.requestRender();
+	}
+
+	private refresh(): void {
+		try {
+			this.entries = readFileEntries(dirPrefix(this.search));
+			this.selectedIndex = Math.max(
+				0,
+				Math.min(this.selectedIndex, Math.max(0, this.entries.length - 1)),
+			);
+			this.error = undefined;
+			this.selectedIndex = Math.min(1, Math.max(0, this.entries.length - 1));
+		} catch (error) {
+			this.entries = [];
+			this.selectedIndex = 0;
+			this.error = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	private header(width: number): string {
+		const entries = this.filteredEntries();
+		const total = Math.max(1, entries.length);
+		const index = Math.min(this.selectedIndex + 1, total);
+		const prefix = `${index}/${total}\tFind folder: `;
+		const input = renderInputChild(
+			this.searchInput,
+			Math.max(1, width - visibleWidth(prefix)),
+		);
+		return this.theme.fg("accent", fits(width, `${prefix}${input}`));
+	}
+
+	private border(width: number, color: "accent" | "dim" = "accent"): string {
+		return this.theme.fg(color, "─".repeat(Math.max(0, width)));
+	}
+
+	private renderEntries(lines: string[], width: number): void {
+		if (this.error) {
+			lines.push(this.theme.fg("dim", indent(width, this.error)));
+			this.padRows(lines, width, 1);
+			return;
+		}
+		const entries = this.filteredEntries();
+		if (entries.length === 0) {
+			lines.push(
+				this.theme.fg(
+					"dim",
+					indent(width, this.search ? "No matches." : "No entries."),
+				),
+			);
+			this.padRows(lines, width, 1);
+			return;
+		}
+
+		let rendered = 0;
+		const start = this.visibleStart(entries.length);
+		const end = Math.min(entries.length, start + FILE_EXPLORER_MAX_VISIBLE);
+		for (let i = start; i < end; i++) {
+			lines.push(
+				this.entryLine(width, entries[i]!, {
+					selected: i === this.selectedIndex,
+				}),
+			);
+			rendered++;
+		}
+		this.padRows(lines, width, rendered);
+	}
+
+	private entryLine(
+		width: number,
+		entry: FileEntry,
+		options: { selected: boolean },
+	): string {
+		if (entry.name === "./") return this.currentDirLine(width, options);
+		const left = `${options.selected ? "›" : " "} ${entry.name}`;
+		const meta = `${entry.mode}  ${entry.size.padStart(5)}  ${relativeTime(entry.modified)}`;
+		const metaWidth = Math.min(38, Math.max(0, Math.floor(width * 0.48)));
+		const renderedMeta = fits(metaWidth, meta);
+		const renderedLeft = fits(
+			Math.max(0, width - visibleWidth(renderedMeta) - 1),
+			left,
+		);
+		const gap = " ".repeat(
+			Math.max(
+				1,
+				width - visibleWidth(renderedLeft) - visibleWidth(renderedMeta),
+			),
+		);
+		const styledLeft = !entry.isDirectory
+			? this.theme.fg("dim", renderedLeft)
+			: options.selected
+				? this.theme.fg("accent", renderedLeft)
+				: renderedLeft;
+		return `${styledLeft}${gap}${this.theme.fg("dim", renderedMeta)}`;
+	}
+
+	private currentDirLine(
+		width: number,
+		options: { selected: boolean },
+	): string {
+		const marker = options.selected ? "›" : " ";
+		const name = `${marker} ./`;
+		const note = " (select current dir)";
+		const availableNoteWidth = Math.max(0, width - visibleWidth(name));
+		const renderedNote = fits(availableNoteWidth, note);
+		const renderedName = fits(
+			Math.max(0, width - visibleWidth(renderedNote)),
+			name,
+		);
+		const padding = " ".repeat(
+			Math.max(
+				0,
+				width - visibleWidth(renderedName) - visibleWidth(renderedNote),
+			),
+		);
+		const styledName = options.selected
+			? this.theme.fg("accent", renderedName)
+			: renderedName;
+		return `${styledName}${this.theme.fg("dim", renderedNote)}${padding}`;
+	}
+
+	private visibleStart(total: number): number {
+		if (total <= FILE_EXPLORER_MAX_VISIBLE) return 0;
+		const half = Math.floor(FILE_EXPLORER_MAX_VISIBLE / 2);
+		return Math.min(
+			Math.max(0, this.selectedIndex - half),
+			total - FILE_EXPLORER_MAX_VISIBLE,
+		);
+	}
+
+	private padRows(lines: string[], width: number, rendered: number): void {
+		for (let i = rendered; i < FILE_EXPLORER_MAX_VISIBLE; i++) {
+			lines.push(" ".repeat(Math.max(0, width)));
+		}
+	}
+
+	private filteredEntries(): FileEntry[] {
+		const query = this.search.trim().split("/").pop() ?? "";
+		if (!query) return this.entries;
+		return fuzzyFilter(this.entries, query, (entry) => entry.name);
+	}
+
+	private clampSelection(): void {
+		const maxIndex = Math.max(0, this.filteredEntries().length - 1);
+		this.selectedIndex = Math.max(0, Math.min(this.selectedIndex, maxIndex));
+	}
+
+	private move(delta: number): void {
+		const entries = this.filteredEntries();
+		if (entries.length === 0) return;
+		this.selectedIndex =
+			(this.selectedIndex + delta + entries.length) % entries.length;
+		this.requestRender();
+	}
+
+	private selected(): FileEntry | undefined {
+		return this.filteredEntries()[this.selectedIndex];
+	}
+
+	private enterSelectedDirectory(): void {
+		const entry = this.selected();
+		if (!entry?.isDirectory) return;
+		const next = normalizeExistingDir(entry.path) + "/";
+		if (!next) return;
+		this.search = next;
+		this.refresh();
+		this.requestRender();
+	}
+
+	private chooseSelectedDirectory(): void {
+		const entry = this.selected();
+		if (!entry?.isDirectory) return;
+		const chosen = normalizeExistingDir(entry.path);
+		if (chosen) this.done(chosen);
+	}
+}
+
 class SessionsPanel {
 	private sessions: SessionInfo[] = [];
 	private selected = 0;
@@ -74,6 +491,7 @@ class SessionsPanel {
 	private readonly done: () => void;
 	private readonly actions: PanelActions;
 	private readonly requestRender: () => void;
+	private folderExplorer: FileExplorer | null = null;
 	private timer: NodeJS.Timeout | null = null;
 
 	constructor(
@@ -144,12 +562,29 @@ class SessionsPanel {
 	}
 
 	handleInput(data: string): void {
+		if (this.folderExplorer) {
+			this.folderExplorer.handleInput(data);
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			this.close();
 			return;
 		}
 		if (isCtrl(data, "o")) {
-			void this.actions.newSession().then(() => this.close());
+			this.folderExplorer = new FileExplorer(
+				this.actions.getCwd(),
+				this.theme,
+				(cwd: string | null) => {
+					this.folderExplorer = null;
+					if (cwd) {
+						void this.actions.newSessionInFolder(cwd).then(() => this.close());
+					} else {
+						this.requestRender();
+					}
+				},
+				this.requestRender,
+			);
+			this.requestRender();
 			return;
 		}
 		if (isCtrl(data, "r")) {
@@ -203,6 +638,8 @@ class SessionsPanel {
 	}
 
 	render(width: number): string[] {
+		if (this.folderExplorer) return this.folderExplorer.render(width);
+
 		const th = this.theme;
 		const border = (color: "accent" | "dim" = "accent") =>
 			th.fg(color, "─".repeat(Math.max(0, width)));
@@ -277,7 +714,7 @@ class SessionsPanel {
 		lines.push(
 			dim(
 				padVisible(
-					"↑↓ move · <enter> switch · <C-o> new · <C-r> resume · <C-k> kill · <esc> close",
+					"↑↓ move · <enter> switch · <C-o> new in folder · <C-r> resume · <C-k> kill · <esc> close",
 					width,
 				),
 			),
@@ -287,6 +724,7 @@ class SessionsPanel {
 
 	invalidate(): void {
 		this.filterInput.invalidate();
+		this.folderExplorer?.invalidate();
 	}
 
 	dispose(): void {

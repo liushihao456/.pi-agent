@@ -568,6 +568,7 @@ async function openPanel(ctx: CommandContext): Promise<void> {
 	await showSessionsPanel(ctx, {
 		getSessions: () => selectorSessions(ctx),
 		getAttached: () => attachedSession,
+		getCwd: () => ctx.cwd || process.cwd(),
 		switchTo: async (name: string) => {
 			if (name === PARENT_SESSION_ID || name === "parent") {
 				attachedSession = null;
@@ -581,6 +582,15 @@ async function openPanel(ctx: CommandContext): Promise<void> {
 			const session = createSession({
 				name: `${base}-${Date.now().toString(36).slice(-5)}`,
 				cwd: ctx.cwd,
+			});
+			attachedSession = session.name;
+			setTimeout(() => void attachSession(ctx, session.name), 0);
+		},
+		newSessionInFolder: async (cwd: string) => {
+			const base = path.basename(cwd) || "session";
+			const session = createSession({
+				name: `${base}-${Date.now().toString(36).slice(-5)}`,
+				cwd,
 			});
 			attachedSession = session.name;
 			setTimeout(() => void attachSession(ctx, session.name), 0);
@@ -625,6 +635,7 @@ async function openChildPanel(ctx: CommandContext): Promise<void> {
 			];
 		},
 		getAttached: () => process.env.PI_SESSIONS_SESSION_NAME || null,
+		getCwd: () => ctx.cwd || process.cwd(),
 		switchTo: async (name: string) => {
 			if (name === PARENT_SESSION_ID || name === "parent") {
 				await bridgeCall("detach", {
@@ -642,6 +653,14 @@ async function openChildPanel(ctx: CommandContext): Promise<void> {
 			await bridgeCall("createSession", {
 				name: `${base}-${Date.now().toString(36).slice(-5)}`,
 				cwd: ctx.cwd,
+				resume: false,
+			});
+		},
+		newSessionInFolder: async (cwd: string) => {
+			const base = path.basename(cwd) || "session";
+			await bridgeCall("createSession", {
+				name: `${base}-${Date.now().toString(36).slice(-5)}`,
+				cwd,
 				resume: false,
 			});
 		},
