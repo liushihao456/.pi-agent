@@ -109,6 +109,10 @@ function findSession(nameOrId: string | null | undefined): any | null {
 	);
 }
 
+function stripTerminalKeyboardControls(data: string): string {
+	return data.replace(/\x1b\[(>\d+u|<u|>4;\dm|\?u)/g, "");
+}
+
 function publicSession(s: any): SessionInfo {
 	return {
 		id: s.id,
@@ -235,7 +239,7 @@ function createSession(opts: {
 	sessions.set(id, s);
 	proc.onData((data: string) => {
 		s.lastActivityAt = Date.now();
-		s.replay = (s.replay + data).slice(-200_000);
+		s.replay = (s.replay + stripTerminalKeyboardControls(data)).slice(-200_000);
 	});
 	proc.onExit(({ exitCode, signal }: any) => {
 		releaseLocks(id);
@@ -576,14 +580,14 @@ async function attachSession(ctx: CommandContext, name: string): Promise<void> {
 				broadcastWidgetSnapshot();
 				resize();
 				process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
-				if (next.replay) process.stdout.write(next.replay);
-				// Strip keyboard protocol push/query sequences (CSI >7u, ?u, >4;2m)
-				// from child PTY output so they don't alter the real terminal's
-				// keyboard state via stdout processing. Without this, the child's
-				// TUI startup would leave Kitty and modifyOtherKeys enabled on the
-				// real terminal, leaking release events and garbled keys later.
+				if (next.replay)
+					process.stdout.write(stripTerminalKeyboardControls(next.replay));
+				// Strip keyboard protocol and modifyOtherKeys controls from child PTY
+				// output before it reaches the real terminal. This must apply to both
+				// replay and live data; otherwise child startup sequences buffered
+				// before attach can re-enable Kitty protocol and leak key-release CSI.
 				ptyDataDisposable = next.pty.onData((data: string) => {
-					process.stdout.write(data.replace(/\x1b\[(>\d+u|>4;\dm|\?u)/g, ""));
+					process.stdout.write(stripTerminalKeyboardControls(data));
 				});
 			};
 
