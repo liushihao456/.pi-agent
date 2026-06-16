@@ -11,7 +11,7 @@
     "npm:pi-mcp-adapter",
     "npm:pi-simplify",
     "npm:pi-markdown-preview",
-    "npm:pi-btw",
+    "npm:@juicesharp/rpiv-btw",
     "npm:pi-lens",
     "npm:pi-caveman",
     "npm:pi-claude-style-tools",
