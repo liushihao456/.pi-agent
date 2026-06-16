@@ -62,6 +62,14 @@ if (!state.serverName) {
 const FILE_EXPLORER_MAX_VISIBLE = 8;
 const PROJECT_PICKER_MAX_VISIBLE = 12;
 
+function externalTerminalModeReset(): string {
+	return (
+		"\x1B[?2004l" + // bracketed paste
+		"\x1B[?1000l\x1B[?1002l\x1B[?1003l\x1B[?1006l" + // mouse reporting
+		"\x1B[<999u\x1B[>4;0m" // Kitty keyboard stack + modifyOtherKeys
+	);
+}
+
 function run(command: string, args: string[], options: SpawnOptions = {}) {
 	return new Promise<void>((resolve, reject) => {
 		options.onBefore?.();
@@ -959,8 +967,8 @@ async function openEmacsWithArgs(
 			stdio: "inherit",
 			onBefore: () => {
 				tui.stop();
+				process.stdout.write(externalTerminalModeReset());
 				process.stdout.write("\x1B[2J\x1B[H");
-				process.stdout.write("\x1B[?1000l\x1B[?1002l\x1B[?1003l\x1B[?1006l");
 			},
 			onAfter: () => {
 				tui.start();

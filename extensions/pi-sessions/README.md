@@ -1,97 +1,61 @@
 # pi-sessions
 
-`pi-sessions` turns one parent Pi TUI into a small tmux-style controller for multiple live Pi child processes.
+`pi-sessions` turns one Pi process into an in-process live-session multiplexer.
 
-Each child is a full `pi` TUI running inside a PTY. Attaching temporarily stops the parent TUI and gives the real terminal to the child PTY. Switching away does not stop the child process.
+Multiple Pi sessions can stay alive concurrently. Exactly one session owns the terminal at a time. Switching away stops only the inactive TUI, not its agent runtime.
 
-## Commands
+## Command
 
-Parent Pi commands:
+Only one slash command is exposed:
 
 - `/sessions` — open the session switcher.
-- `/sessions:new <name>` — start a complete Pi TUI child process.
-- `/sessions:resume <name>` — start a child Pi with Pi's built-in resume selector, then switch to it. `<name>` is only the pi-sessions handle; resumed Pi transcript names are not rewritten.
-- `/sessions:list` — list running child Pi processes.
-- `/sessions:panel` — open the session switcher.
-- `/sessions:attach <name>` — switch to a child Pi PTY.
-- `/sessions:switch <name>` — switch to a child Pi PTY.
-- `/sessions:detach` — switch back to the parent session.
-- `/sessions:stop <name>` / `/sessions:kill <name>` — kill a child Pi process and remove it from the list.
 
-Switcher keys:
+All session operations happen inside that switcher.
 
-- type normally — filter sessions from the always-focused `Filter:` input.
-- `↑` / `↓` — select switch target.
-- `Enter` — switch to selected session. Selecting `parent` switches back to parent.
-- `Ctrl-O` — create new child session, then switch to it.
-- `Ctrl-R` — resume a saved Pi session, then switch to it.
-- `Ctrl-K` — kill selected child session.
+## Switcher keys
+
+- type normally — filter live sessions.
+- `↑` / `↓` or `Ctrl-P` / `Ctrl-N` — move selection.
+- `Enter` — switch to selected live session. Selecting `parent` switches back to parent.
+- `Ctrl-O` — open `FileExplorer`; selecting a folder creates a new child session in that folder and switches to it.
+- `Ctrl-R` — open a one-off resume flow; selecting a saved Pi session opens it as a live child and switches to it.
+- `Ctrl-K` — stop selected live child session.
 - `Esc` — close switcher.
 
-Attached child commands:
-
-- `/sessions` — open the same parent-managed session switcher inside the child.
-- `/sessions:switch <name>` — ask the parent attach loop to switch to another child.
-- `/sessions:detach` — ask the parent attach loop to detach.
-- `/sessions:list` — list parent-managed children.
-
-Detach/switch from inside the attached child with `/sessions:detach` or `/sessions:switch <name>`. No parent escape key is currently intercepted.
+The main `/sessions` list shows only live sessions: parent plus live children. Saved sessions are not indexed or shown there.
 
 ## Runtime model
 
 ```text
-parent Pi TUI
-  └─ pi-sessions controller
-      ├─ child A: full pi TUI in PTY
-      ├─ child B: full pi TUI in PTY
-      └─ child C: full pi TUI in PTY
+parent Pi process
+  └─ pi-sessions live-session multiplexer
+      ├─ parent: existing InteractiveMode
+      ├─ child A: AgentSessionRuntime + InteractiveMode
+      ├─ child B: AgentSessionRuntime + InteractiveMode
+      └─ child C: AgentSessionRuntime + InteractiveMode
 ```
 
-Child spawn shape:
+Child sessions are real native `InteractiveMode` instances, not embedded panels. When active, child UI is full-screen and native Pi slash-command UI works as usual.
 
-```bash
-PI_SESSIONS_CHILD=1 pi --name <name> -e worker-guard.ts
-```
-
-No `pi --mode rpc` workers are used. Child PTY handles live in the parent extension process; `/reload` or parent Pi exit kills/drops all child sessions.
-
-## UI policy
-
-This extension intentionally does not use widget/footer/status UI for session communication.
-
-Removed patterns:
-
-- pi-sessions widget calls
-- pi-sessions footer/status calls
-- widget log tails for attached sessions
-- footer status indicators
-
-Session interaction happens through:
-
-1. raw terminal switching (`tui.stop()` + PTY stdin/stdout forwarding);
-2. parent session switcher;
-3. child bridge commands.
+`/quit` keeps native behavior and exits the whole Pi process.
 
 ## Path locks
 
-Children share the same cwd by default. `worker-guard.ts` stays loaded in every child and asks the parent bridge for path locks before write/edit/mutating shell tools run.
+All live sessions share one in-process lock manager. Before write/edit/mutating shell tools run, `pi-sessions` checks for conflicting path locks and blocks conflicting writes.
 
-This prevents two live Pi children from editing the same path tree at once.
+This prevents two live sessions from editing the same path tree at once.
 
-## Runtime files
+## No PTY bridge
 
-```text
-~/.pi/agent/pi-sessions/
-└── bridge-<parent-pid>.sock
-```
+The default runtime no longer uses child subprocesses, PTYs, sockets, or `worker-guard.ts`.
 
-The bridge socket is only for child slash commands and path locks. Interactive PTY input/output is forwarded directly between the real terminal and the active child PTY, not socket/polling based.
+Removed old model pieces:
 
-## Dependencies
-
-- `@homebridge/node-pty-prebuilt-multiarch` — runs full Pi TUIs in PTYs.
-
-If npm warns about pending install scripts for the PTY package, approve only after inspecting the package/source you trust.
+- `node-pty` dependency
+- `PI_SESSIONS_CHILD` subprocess mode
+- bridge socket
+- child worker guard
+- PTY attach/detach forwarding
 
 ## Reload
 

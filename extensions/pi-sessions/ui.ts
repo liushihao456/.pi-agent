@@ -28,14 +28,25 @@ type SessionInfo = {
 	shortName?: string;
 };
 
+type SavedSessionInfo = {
+	path: string;
+	id: string;
+	cwd: string;
+	name?: string;
+	modified?: Date;
+	firstMessage?: string;
+	messageCount?: number;
+};
+
 type SessionsActions = {
 	getSessions: () => Promise<SessionInfo[]>;
+	getResumeSessions?: () => Promise<SavedSessionInfo[]>;
 	getAttached: () => string | null;
 	getCwd: () => string;
 	switchTo: (name: string) => Promise<void>;
 	newSession: () => Promise<void>;
 	newSessionInFolder: (cwd: string) => Promise<void>;
-	resumeSession: () => Promise<void>;
+	resumeSession: (sessionPath?: string) => Promise<void>;
 	killSession: (name: string) => Promise<void>;
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
 };
@@ -48,9 +59,15 @@ type WidgetSnapshot = {
 
 const PARENT_SESSION_ID = "__parent__";
 
-function isCtrl(data: string, key: "o" | "r" | "k"): boolean {
-	const code = key === "o" ? "\x0f" : key === "r" ? "\x12" : "\x0b";
-	return data === code || matchesKey(data, Key.ctrl(key));
+function isCtrl(data: string, key: "o" | "r" | "k" | "p" | "n"): boolean {
+	const codes: Record<string, string> = {
+		o: "\x0f",
+		r: "\x12",
+		k: "\x0b",
+		p: "\x10",
+		n: "\x0e",
+	};
+	return data === codes[key] || matchesKey(data, Key.ctrl(key));
 }
 
 function padVisible(text: string, width: number): string {
@@ -576,6 +593,169 @@ export class FileExplorer implements Component, Focusable {
 	}
 }
 
+class ResumeSessionPicker implements Component, Focusable {
+	private sessions: SavedSessionInfo[] = [];
+	private selected = 0;
+	private loading = true;
+	private error: string | null = null;
+	private readonly filterInput = new Input();
+
+	constructor(
+		private readonly theme: any,
+		private readonly loadSessions: () => Promise<SavedSessionInfo[]>,
+		private readonly onDone: (sessionPath: string | null) => void,
+		private readonly requestRender: () => void,
+	) {
+		this.filterInput.focused = true;
+		void this.refresh();
+	}
+
+	get focused(): boolean {
+		return true;
+	}
+
+	set focused(_value: boolean) {}
+
+	private async refresh(): Promise<void> {
+		try {
+			this.error = null;
+			this.sessions = await this.loadSessions();
+		} catch (error) {
+			this.error = String(error);
+		} finally {
+			this.loading = false;
+			this.clampSelection();
+			this.requestRender();
+		}
+	}
+
+	private filteredSessions(): SavedSessionInfo[] {
+		const query = this.filterInput.getValue().trim().toLowerCase();
+		if (!query) return this.sessions;
+		return this.sessions.filter((session) =>
+			[
+				session.name,
+				session.cwd,
+				session.firstMessage,
+				session.path,
+				session.id,
+			]
+				.filter(Boolean)
+				.some((value) => String(value).toLowerCase().includes(query)),
+		);
+	}
+
+	private clampSelection(): void {
+		const max = Math.max(0, this.filteredSessions().length - 1);
+		this.selected = Math.max(0, Math.min(this.selected, max));
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) {
+			this.onDone(null);
+			return;
+		}
+		if (matchesKey(data, "up") || isCtrl(data, "p")) {
+			this.selected = Math.max(0, this.selected - 1);
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, "down") || isCtrl(data, "n")) {
+			this.selected = Math.min(
+				Math.max(0, this.filteredSessions().length - 1),
+				this.selected + 1,
+			);
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, "return") || matchesKey(data, "enter")) {
+			const session = this.filteredSessions()[this.selected];
+			if (session?.path) this.onDone(session.path);
+			return;
+		}
+		const before = this.filterInput.getValue();
+		this.filterInput.handleInput(data);
+		if (this.filterInput.getValue() !== before) this.selected = 0;
+		this.clampSelection();
+		this.requestRender();
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const border = (color: "accent" | "dim" = "accent") =>
+			th.fg(color, "─".repeat(Math.max(0, width)));
+		const accent = (s: string) => th.fg("accent", s);
+		const dim = (s: string) => th.fg("dim", s);
+		const muted = (s: string) => th.fg("muted", s);
+		const error = (s: string) => th.fg("error", s);
+		const lines: string[] = [];
+		const visibleSessions = this.filteredSessions();
+		const total = Math.max(1, visibleSessions.length);
+		const index = Math.min(this.selected + 1, total);
+		const prefix = `${index}/${total}\tResume: `;
+		const renderedInput = renderInputChild(
+			this.filterInput,
+			width - visibleWidth(prefix),
+		);
+
+		lines.push(border());
+		lines.push(accent(fits(width, `${prefix}${renderedInput}`)));
+		lines.push(border("dim"));
+		if (this.error) {
+			lines.push(padVisible(`  ${error("error")} ${this.error}`, width));
+		} else if (visibleSessions.length === 0) {
+			lines.push(
+				padVisible(
+					`  ${dim(this.loading ? "Loading…" : "No saved sessions")}`,
+					width,
+				),
+			);
+		} else {
+			const nameW = 28;
+			const cwdW = 34;
+			for (let i = 0; i < visibleSessions.length; i++) {
+				const session = visibleSessions[i]!;
+				const marker = i === this.selected ? "›" : " ";
+				const title =
+					session.name || session.firstMessage || session.id.slice(0, 8);
+				const styledTitle =
+					i === this.selected
+						? accent(`${marker} ${title}`)
+						: `${marker} ${title}`;
+				const left = padVisible(styledTitle, nameW);
+				const cwd = muted(truncateToWidth(session.cwd || "", cwdW, "…"));
+				const msg = muted(
+					truncateToWidth(
+						session.firstMessage || "",
+						Math.max(0, width - nameW - cwdW - 2),
+						"…",
+					),
+				);
+				lines.push(padVisible(`${left}${cwd}  ${msg}`, width));
+			}
+		}
+		lines.push(border());
+		lines.push(
+			padVisible(
+				dim("↑/<C-p><C-n>") +
+					muted(" move · ") +
+					dim("<enter>") +
+					muted(" resume · ") +
+					dim("<esc>") +
+					muted(" back"),
+				width,
+			),
+		);
+		return lines;
+	}
+
+	invalidate(): void {
+		this.filterInput.invalidate();
+	}
+
+	dispose(): void {}
+}
+
 class SessionsView {
 	private sessions: SessionInfo[] = [];
 	private selected = 0;
@@ -589,6 +769,7 @@ class SessionsView {
 	private readonly actions: SessionsActions;
 	private readonly requestRender: () => void;
 	private folderExplorer: FileExplorer | null = null;
+	private resumePicker: ResumeSessionPicker | null = null;
 	private timer: NodeJS.Timeout | null = null;
 
 	constructor(
@@ -652,7 +833,8 @@ class SessionsView {
 
 	private isCurrent(session: SessionInfo): boolean {
 		const attached = this.actions.getAttached();
-		if (session.id === PARENT_SESSION_ID) return !attached;
+		if (session.id === PARENT_SESSION_ID)
+			return !attached || attached === PARENT_SESSION_ID;
 		return attached === session.name || attached === session.id;
 	}
 
@@ -679,6 +861,10 @@ class SessionsView {
 			this.folderExplorer.handleInput(data);
 			return;
 		}
+		if (this.resumePicker) {
+			this.resumePicker.handleInput(data);
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			this.close();
 			return;
@@ -701,7 +887,26 @@ class SessionsView {
 			return;
 		}
 		if (isCtrl(data, "r")) {
-			void this.actions.resumeSession().then(() => this.close());
+			if (!this.actions.getResumeSessions) {
+				void this.actions.resumeSession().then(() => this.close());
+				return;
+			}
+			this.resumePicker = new ResumeSessionPicker(
+				this.theme,
+				this.actions.getResumeSessions,
+				(sessionPath: string | null) => {
+					this.resumePicker = null;
+					if (sessionPath) {
+						void this.actions
+							.resumeSession(sessionPath)
+							.then(() => this.close());
+					} else {
+						this.requestRender();
+					}
+				},
+				this.requestRender,
+			);
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, "up") || isCtrl(data, "p")) {
@@ -734,7 +939,7 @@ class SessionsView {
 				this.actions.notify("Cannot kill parent session.", "warning");
 				return;
 			}
-			void this.actions.killSession(session.name).then(() => this.refresh());
+			void this.actions.killSession(session.name).then(() => this.close());
 			return;
 		}
 
@@ -751,6 +956,7 @@ class SessionsView {
 
 	render(width: number): string[] {
 		if (this.folderExplorer) return this.folderExplorer.render(width);
+		if (this.resumePicker) return this.resumePicker.render(width);
 
 		const th = this.theme;
 		const border = (color: "accent" | "dim" = "accent") =>
@@ -793,7 +999,7 @@ class SessionsView {
 				const selected = i === this.selected;
 				const isAttached =
 					session.id === PARENT_SESSION_ID
-						? !attached
+						? !attached || attached === PARENT_SESSION_ID
 						: attached === session.name || attached === session.id;
 				const marker = selected ? "›" : " ";
 				const base = session.shortName || session.name;
@@ -843,6 +1049,7 @@ class SessionsView {
 	invalidate(): void {
 		this.filterInput.invalidate();
 		this.folderExplorer?.invalidate();
+		this.resumePicker?.invalidate();
 	}
 
 	dispose(): void {

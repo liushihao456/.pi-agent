@@ -1,13 +1,54 @@
 // @ts-nocheck
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import pty from "@homebridge/node-pty-prebuilt-multiarch";
+import {
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
+	getAgentDir,
+	InteractiveMode,
+	SessionManager,
+	type CreateAgentSessionRuntimeFactory,
+} from "@earendil-works/pi-coding-agent";
 import { SessionWidget, showSessionsView } from "./ui.ts";
 
-function readFirstMessage(filePath: string): string {
+const PARENT_SESSION_ID = "__parent__";
+const HOST_KEY = "__PI_SESSIONS_HOST__";
+
+type ExtensionAPI = any;
+type CommandContext = any;
+type Activity = "idle" | "working" | "compacting" | "retrying" | "waiting";
+type LiveState = "active" | "suspended" | "starting" | "stopped" | "error";
+
+type LiveSessionRecord = {
+	id: string;
+	kind: "parent" | "child";
+	name: string;
+	cwd: string;
+	state: LiveState;
+	activity: Activity;
+	sessionFile?: string;
+	sessionId?: string;
+	parentSessionFile?: string;
+	parentLeafId?: string | null;
+	createdAt: number;
+	lastActivityAt: number;
+	status?: string;
+	transcript?: string;
+	runtime?: any;
+	mode?: any;
+	adapter?: InteractiveModeAdapter;
+	sessionManager?: any;
+	context?: CommandContext;
+	started?: boolean;
+	runPromise?: Promise<void>;
+	expectedStop?: boolean;
+	error?: string;
+};
+
+function readFirstMessage(filePath: string | undefined): string {
+	if (!filePath) return "";
 	try {
 		const content = fs.readFileSync(filePath, "utf8");
 		for (const line of content.split("\n")) {
@@ -34,48 +75,11 @@ function readFirstMessage(filePath: string): string {
 }
 
 function resolveTranscriptName(
-	sessionName: string | undefined,
-	sessionFile: string | undefined,
+	sessionName?: string,
+	sessionFile?: string,
 ): string {
-	if (sessionName) return sessionName;
-	if (sessionFile) return readFirstMessage(sessionFile);
-	return "";
+	return sessionName || readFirstMessage(sessionFile) || "";
 }
-
-type ExtensionAPI = any;
-type CommandContext = any;
-
-type SessionInfo = {
-	id: string;
-	name: string;
-	cwd: string;
-	state: string;
-	status?: string;
-	pid?: number | null;
-	lastActivityAt?: number;
-	cols?: number;
-	rows?: number;
-};
-
-const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-const guardPath = path.join(extensionDir, "worker-guard.ts");
-const dataDir = path.join(os.homedir(), ".pi", "agent", "pi-sessions");
-const bridgeSocketPath = path.join(dataDir, `bridge-${process.pid}.sock`);
-const sessions = new Map<string, any>();
-const locks = new Map<string, { sessionId: string; acquiredAt: number }>();
-const widgetSubscribers = new Set<net.Socket>();
-const parentWidgetRenders = new Set<() => void>();
-let bridgeServer: net.Server | null = null;
-let attachedSession: string | null = null;
-let childWidgetSnapshot: any = null;
-let childWidgetSocket: net.Socket | null = null;
-const state = {
-	parentCwd: process.cwd(),
-	parentTranscript: "",
-	parentAgentStatus: "idle",
-};
-
-const PARENT_SESSION_ID = "__parent__";
 
 function sanitizeName(name: string): string {
 	return (
@@ -87,203 +91,71 @@ function sanitizeName(name: string): string {
 	);
 }
 
-function findPiCommand(): string {
-	for (const candidate of [
-		process.env.PI_SESSIONS_PI_BIN,
-		"/opt/homebrew/bin/pi",
-		"/usr/local/bin/pi",
-	].filter(Boolean)) {
-		try {
-			if (fs.existsSync(candidate)) return candidate;
-		} catch {}
+function sessionNameForCwd(cwd: string): string {
+	const base = path.basename(cwd || process.cwd()) || "session";
+	return sanitizeName(`${base}-${Date.now().toString(36).slice(-5)}`);
+}
+
+function asString(value: unknown): string | null {
+	return typeof value === "string" && value.trim() ? value : null;
+}
+
+function inferToolPaths(toolName: string, input: any): string[] {
+	const paths = new Set<string>();
+	if (toolName === "write" || toolName === "edit") {
+		const p =
+			asString(input?.path) ||
+			asString(input?.file_path) ||
+			asString(input?.filePath);
+		if (p) paths.add(p);
 	}
-	return "pi";
-}
-
-function findSession(nameOrId: string | null | undefined): any | null {
-	if (!nameOrId) return null;
-	return (
-		sessions.get(nameOrId) ||
-		[...sessions.values()].find((s) => s.name === nameOrId) ||
-		null
-	);
-}
-
-function stripTerminalKeyboardControls(data: string): string {
-	return data.replace(/\x1b\[(>\d+u|<u|>4;\dm|\?u)/g, "");
-}
-
-function publicSession(s: any): SessionInfo {
-	return {
-		id: s.id,
-		name: s.name,
-		cwd: s.cwd,
-		state: s.state,
-		status: s.status,
-		pid: s.pty?.pid ?? null,
-		lastActivityAt: s.lastActivityAt,
-		agentStatus: s.agentStatus || "idle",
-		cols: s.cols,
-		rows: s.rows,
-		transcript: s.transcript || "",
-	};
-}
-
-function widgetSnapshot(): any {
-	return {
-		attached: attachedSession || PARENT_SESSION_ID,
-		updatedAt: Date.now(),
-		sessions: [
-			{
-				id: PARENT_SESSION_ID,
-				name: "parent",
-				cwd: state.parentCwd || process.cwd(),
-				state: "idle",
-				status: "parent",
-				pid: process.pid,
-				lastActivityAt: 0,
-				agentStatus: state.parentAgentStatus || "idle",
-				transcript: state.parentTranscript || "",
-			},
-			...[...sessions.values()]
-				.filter((session) => session.state === "running")
-				.map(publicSession),
-		],
-	};
-}
-
-function sendWidgetSnapshot(
-	socket: net.Socket,
-	snapshot = widgetSnapshot(),
-): void {
-	try {
-		sendJson(socket, { type: "widgetSnapshot", snapshot });
-	} catch {
-		widgetSubscribers.delete(socket);
-	}
-}
-
-function broadcastWidgetSnapshot(): void {
-	const snapshot = widgetSnapshot();
-	for (const socket of [...widgetSubscribers])
-		sendWidgetSnapshot(socket, snapshot);
-	if (attachedSession) return;
-	for (const render of [...parentWidgetRenders]) {
-		try {
-			render();
-		} catch {}
-	}
-}
-
-function notifySession(s: any): void {
-	for (const cb of [...s.subscribers]) {
-		try {
-			cb();
-		} catch {}
-	}
-	broadcastWidgetSnapshot();
-}
-
-function createSession(opts: {
-	name: string;
-	cwd: string;
-	resume?: boolean;
-	cols?: number;
-	rows?: number;
-}): SessionInfo {
-	const name = sanitizeName(opts.name);
-	if (
-		[...sessions.values()].some(
-			(s) => s.name === name && !["stopped", "error"].includes(s.state),
-		)
-	)
-		throw new Error(`session already exists: ${name}`);
-	const id = `${name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-	const cwd = opts.cwd || process.cwd();
-	const cols = Number(opts.cols || 120);
-	const rows = Number(opts.rows || 40);
-	const args = opts.resume
-		? ["--resume", "-e", guardPath]
-		: ["--name", name, "-e", guardPath];
-	const env = {
-		...process.env,
-		PI_SESSIONS_CHILD: "1",
-		PI_SESSIONS_SESSION_ID: id,
-		PI_SESSIONS_SESSION_NAME: name,
-		PI_SESSIONS_BRIDGE_SOCKET: bridgeSocketPath,
-		PI_SESSIONS_PARENT_CWD: state.parentCwd,
-		TERM: process.env.TERM || "xterm-256color",
-	};
-	const proc = pty.spawn(findPiCommand(), args, {
-		cwd,
-		env,
-		cols,
-		rows,
-		name: "xterm-256color",
-	});
-	const s = {
-		id,
-		name,
-		cwd,
-		state: "running",
-		status: "running",
-		lastActivityAt: Date.now(),
-		agentStatus: "idle" as string,
-		transcript: "",
-		pty: proc,
-		cols,
-		rows,
-		replay: "",
-		subscribers: new Set<() => void>(),
-	};
-	sessions.set(id, s);
-	proc.onData((data: string) => {
-		s.lastActivityAt = Date.now();
-		s.replay = (s.replay + stripTerminalKeyboardControls(data)).slice(-200_000);
-	});
-	proc.onExit(({ exitCode, signal }: any) => {
-		releaseLocks(id);
-		s.state = s.expectedStop || exitCode === 0 ? "stopped" : "error";
-		s.status = s.expectedStop
-			? "stopped"
-			: `exited ${exitCode}${signal ? ` ${signal}` : ""}`;
-		if (attachedSession === s.name || attachedSession === s.id) {
-			attachedSession = null;
-			for (const session of sessions.values()) notifySession(session);
-			return;
+	if (toolName === "bash") {
+		const command = asString(input?.command) || "";
+		const redir = [...command.matchAll(/(?:>|>>|2>|&>)\s*([^\s;&|]+)/g)].map(
+			(m) => m[1],
+		);
+		for (const p of redir) {
+			if (p && !p.startsWith("/dev/")) paths.add(p.replace(/^["']|["']$/g, ""));
 		}
-		notifySession(s);
-	});
-	return publicSession(s);
+		const mutating =
+			/\b(rm|mv|cp|touch|mkdir|rmdir|chmod|chown|install|tee|sed\s+-i|perl\s+-i|python\b.*\b(open|write)|node\b.*writeFile)\b/.test(
+				command,
+			);
+		if (mutating) {
+			const tokens = command.match(/(?:\.\.?|~|\/)?[\w@%+=:,./-]+/g) || [];
+			for (const token of tokens) {
+				if (token.includes("/") || token.startsWith("."))
+					paths.add(token.replace(/^["']|["']$/g, ""));
+			}
+			if (paths.size === 0) paths.add(".");
+		}
+	}
+	return [...paths];
 }
 
-function stopSession(nameOrId: string): SessionInfo {
-	const s = findSession(nameOrId);
-	if (!s) throw new Error("session not found");
-	const info = publicSession(s);
-	s.expectedStop = true;
-	releaseLocks(s.id);
-	sessions.delete(s.id);
-	if (attachedSession === s.name || attachedSession === s.id)
-		attachedSession = null;
-	s.pty?.kill("SIGTERM");
-	notifySession(s);
-	return info;
+function needsPermission(
+	toolName: string,
+	input: any,
+	sessionName: string,
+): string | null {
+	if (toolName === "bash") {
+		const command = asString(input?.command) || "";
+		if (/\bsudo\b|\brm\s+(-rf?|--recursive|--force)/i.test(command)) {
+			return `Dangerous bash command in ${sessionName}: ${command}`;
+		}
+	}
+	return null;
 }
 
-function resizeSession(nameOrId: string, cols: number, rows: number): void {
-	const s = findSession(nameOrId);
-	if (!s) return;
-	cols = Math.max(20, Number(cols || s.cols));
-	rows = Math.max(5, Number(rows || s.rows));
-	if (cols === s.cols && rows === s.rows) return;
-	s.cols = cols;
-	s.rows = rows;
-	s.pty?.resize(cols, rows);
+function resetExtendedKeyboardModesForHandoff(): void {
+	try {
+		process.stdout.write("\x1b[<999u\x1b[>4;0m");
+	} catch {}
 }
 
 function normalizeLockPath(p: string, cwd: string): string | null {
 	if (!p || typeof p !== "string") return null;
+	if (p.startsWith("~")) return path.join(os.homedir(), p.slice(1));
 	return path.resolve(cwd || process.cwd(), p);
 }
 
@@ -293,573 +165,668 @@ function pathsConflict(a: string, b: string): boolean {
 	return a === b || a.startsWith(br) || b.startsWith(ar);
 }
 
-function acquireLocks(sessionId: string, rawPaths: string[], cwd: string) {
-	const paths = [
-		...new Set(
-			(rawPaths || []).map((p) => normalizeLockPath(p, cwd)).filter(Boolean),
-		),
-	].sort();
-	const conflicts = [];
-	for (const p of paths) {
-		for (const [held, info] of locks.entries()) {
-			if (info.sessionId !== sessionId && pathsConflict(p, held))
-				conflicts.push({ path: p, heldPath: held, by: info.sessionId });
-		}
-	}
-	if (conflicts.length) return { ok: false, conflicts };
-	const acquiredAt = Date.now();
-	for (const p of paths) locks.set(p, { sessionId, acquiredAt });
-	return { ok: true, paths };
-}
+class LockManager {
+	locks = new Map<string, { sessionId: string; acquiredAt: number }>();
+	heldByToolCall = new Map<string, { sessionId: string; paths: string[] }>();
 
-function releaseLocks(sessionId: string, rawPaths?: string[]) {
-	const released = [];
-	for (const [p, info] of locks.entries()) {
-		if (
-			info.sessionId === sessionId &&
-			(!rawPaths || rawPaths.length === 0 || rawPaths.includes(p))
-		) {
-			locks.delete(p);
-			released.push(p);
-		}
-	}
-	return released;
-}
-
-function sendJson(socket: net.Socket, value: any): void {
-	socket.write(JSON.stringify(value) + "\n");
-}
-
-function startBridgeServer(): void {
-	if (bridgeServer) return;
-	fs.mkdirSync(dataDir, { recursive: true });
-	try {
-		if (fs.existsSync(bridgeSocketPath)) fs.unlinkSync(bridgeSocketPath);
-	} catch {}
-	bridgeServer = net.createServer((socket) => {
-		let buffer = "";
-		socket.on("data", (chunk) => {
-			buffer += chunk.toString("utf8");
-			while (true) {
-				const i = buffer.indexOf("\n");
-				if (i < 0) break;
-				const line = buffer.slice(0, i);
-				buffer = buffer.slice(i + 1);
-				if (!line.trim()) continue;
-				try {
-					const req = JSON.parse(line);
-					if (req.action === "subscribeWidget") {
-						widgetSubscribers.add(socket);
-						socket.once("close", () => widgetSubscribers.delete(socket));
-						socket.once("error", () => widgetSubscribers.delete(socket));
-						sendJson(socket, { id: req.id, success: true, data: { ok: true } });
-						sendWidgetSnapshot(socket);
-						continue;
-					}
-					const data = handleBridgeRequest(req);
-					sendJson(socket, { id: req.id, success: true, data });
-				} catch (error) {
-					sendJson(socket, {
-						success: false,
-						error: String(error?.message || error),
-					});
+	acquire(sessionId: string, rawPaths: string[], cwd: string) {
+		const paths = [
+			...new Set(
+				(rawPaths || []).map((p) => normalizeLockPath(p, cwd)).filter(Boolean),
+			),
+		].sort();
+		const conflicts = [];
+		for (const p of paths) {
+			for (const [held, info] of this.locks.entries()) {
+				if (info.sessionId !== sessionId && pathsConflict(p, held)) {
+					conflicts.push({ path: p, heldPath: held, by: info.sessionId });
 				}
 			}
-		});
-	});
-	bridgeServer.listen(bridgeSocketPath);
+		}
+		if (conflicts.length) return { ok: false, conflicts };
+		const acquiredAt = Date.now();
+		for (const p of paths) this.locks.set(p, { sessionId, acquiredAt });
+		return { ok: true, paths };
+	}
+
+	release(sessionId: string, rawPaths?: string[]) {
+		const wanted = rawPaths?.length ? new Set(rawPaths) : null;
+		const released = [];
+		for (const [p, info] of this.locks.entries()) {
+			if (info.sessionId === sessionId && (!wanted || wanted.has(p))) {
+				this.locks.delete(p);
+				released.push(p);
+			}
+		}
+		return released;
+	}
+
+	releaseByToolCall(toolCallId: string) {
+		const held = this.heldByToolCall.get(toolCallId);
+		if (!held) return [];
+		this.heldByToolCall.delete(toolCallId);
+		return this.release(held.sessionId, held.paths);
+	}
 }
 
-function handleBridgeRequest(req: any): any {
-	switch (req.action) {
-		case "switch": {
-			const s = findSession(req.target || req.name);
-			if (!s) throw new Error(`session not found: ${req.target || req.name}`);
-			attachedSession = s.name;
-			for (const session of sessions.values()) notifySession(session);
-			return { ok: true };
-		}
-		case "detach":
-			attachedSession = null;
-			for (const session of sessions.values()) notifySession(session);
-			return { ok: true };
-		case "listSessions":
-			return {
-				sessions: [...sessions.values()]
-					.filter((session) => session.state === "running")
-					.map(publicSession),
+class InteractiveModeAdapter {
+	state: "never-started" | "active" | "suspended" | "stopped" = "never-started";
+	private terminalGateInstalled = false;
+	private originalSetProgress?: any;
+	private originalSetTitle?: any;
+
+	constructor(
+		readonly id: string,
+		readonly runtime: any,
+		readonly mode: any,
+		private readonly host: PiSessionsHost,
+	) {}
+
+	get ui(): any {
+		return (this.mode as any).ui;
+	}
+
+	installTerminalGate(): void {
+		if (this.terminalGateInstalled) return;
+		const terminal = this.ui?.terminal;
+		if (!terminal) return;
+		this.terminalGateInstalled = true;
+		this.originalSetProgress = terminal.setProgress?.bind(terminal);
+		this.originalSetTitle = terminal.setTitle?.bind(terminal);
+		if (this.originalSetProgress) {
+			terminal.setProgress = (active: boolean) => {
+				if (this.host.activeId === this.id) this.originalSetProgress(active);
 			};
-		case "createSession": {
-			const session = createSession({
-				name: req.name || `session-${Date.now().toString(36)}`,
-				cwd: req.cwd || process.cwd(),
-				resume: Boolean(req.resume),
+		}
+		if (this.originalSetTitle) {
+			terminal.setTitle = (...args: any[]) => {
+				if (this.host.activeId === this.id) this.originalSetTitle(...args);
+			};
+		}
+	}
+
+	start(): void {
+		if (this.state !== "never-started") return this.resume();
+		this.installTerminalGate();
+		this.state = "active";
+		const record = this.host.get(this.id);
+		if (record) {
+			record.started = true;
+			record.state = "active";
+			record.runPromise = this.mode.run().catch((error: any) => {
+				record.state = record.expectedStop ? "stopped" : "error";
+				record.error = String(error?.message || error);
+				record.status = record.error;
+				this.host.locks.release(record.id);
+				this.host.notify();
 			});
-			attachedSession = session.name;
-			for (const item of sessions.values()) notifySession(item);
-			return { session };
+		} else {
+			void this.mode.run();
 		}
-		case "killSession": {
-			const session = stopSession(req.name);
-			for (const item of sessions.values()) notifySession(item);
-			return { session };
-		}
-		case "getCwd":
-			return {
-				cwd: state.parentCwd,
-				parentTranscript: state.parentTranscript || "",
-				parentAgentStatus: state.parentAgentStatus || "idle",
-			};
-		case "statusUpdate": {
-			const target = findSession(req.sessionName || req.sessionId);
-			if (target) {
-				target.agentStatus = req.status || "idle";
-				notifySession(target);
+	}
+
+	suspend(): void {
+		if (this.state === "stopped") return;
+		try {
+			this.ui?.stop?.();
+			resetExtendedKeyboardModesForHandoff();
+		} catch {}
+		this.state = "suspended";
+		const record = this.host.get(this.id);
+		if (record && record.state !== "stopped" && record.state !== "error")
+			record.state = "suspended";
+	}
+
+	resume(): void {
+		if (this.state === "stopped") return;
+		this.installTerminalGate();
+		try {
+			this.ui?.start?.();
+			this.ui?.requestRender?.(true);
+		} catch {}
+		this.state = "active";
+		const record = this.host.get(this.id);
+		if (record) record.state = "active";
+	}
+
+	async dispose(): Promise<void> {
+		this.state = "stopped";
+		const ui = this.ui;
+		const originalUiStop = ui?.stop?.bind(ui);
+		const canTouchTerminal = this.host.activeId === this.id;
+		try {
+			if (ui && originalUiStop && !canTouchTerminal) {
+				ui.stop = () => {};
 			}
-			return { ok: true };
+			this.mode?.stop?.();
+		} catch {
+		} finally {
+			if (ui && originalUiStop) ui.stop = originalUiStop;
 		}
-		case "transcriptUpdate": {
-			const target = findSession(req.sessionName || req.sessionId);
-			if (target && req.transcript) {
-				target.transcript = req.transcript;
-				notifySession(target);
-			}
-			return { ok: true };
-		}
-		case "acquireLock":
-			return acquireLocks(req.sessionId, req.paths || [], req.cwd);
-		case "releaseLock":
-			return { ok: true, released: releaseLocks(req.sessionId, req.paths) };
-		default:
-			throw new Error(`unknown bridge action: ${req.action}`);
+		try {
+			await this.runtime?.dispose?.();
+		} catch {}
 	}
 }
 
-function bridgeCall(
-	action: string,
-	payload: Record<string, unknown> = {},
-): Promise<any> {
-	return new Promise((resolve, reject) => {
-		const socketPath = process.env.PI_SESSIONS_BRIDGE_SOCKET;
-		if (!socketPath)
-			return reject(new Error("PI_SESSIONS_BRIDGE_SOCKET is not set"));
-		const socket = net.createConnection(socketPath);
-		const id = `child-${process.pid}-${Date.now().toString(36)}`;
-		let buffer = "";
-		const timer = setTimeout(() => {
-			socket.destroy();
-			reject(new Error(`bridge timeout: ${action}`));
-		}, 5000);
-		socket.on("connect", () =>
-			socket.write(JSON.stringify({ id, action, ...payload }) + "\n"),
-		);
-		socket.on("data", (chunk) => {
-			buffer += chunk.toString("utf8");
-			const i = buffer.indexOf("\n");
-			if (i < 0) return;
-			clearTimeout(timer);
-			socket.end();
-			const msg = JSON.parse(buffer.slice(0, i));
-			if (msg.success === false) reject(new Error(msg.error || "bridge error"));
-			else resolve(msg.data);
-		});
-		socket.on("error", (error) => {
-			clearTimeout(timer);
-			reject(error);
-		});
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+	cwd,
+	agentDir,
+	sessionManager,
+	sessionStartEvent,
+}) => {
+	const services = await createAgentSessionServices({ cwd, agentDir });
+	const result = await createAgentSessionFromServices({
+		services,
+		sessionManager,
+		sessionStartEvent,
 	});
-}
-
-function subscribeWidgetSnapshots(onSnapshot: (snapshot: any) => void): void {
-	const socketPath = process.env.PI_SESSIONS_BRIDGE_SOCKET;
-	if (!socketPath || childWidgetSocket) return;
-	const socket = net.createConnection(socketPath);
-	childWidgetSocket = socket;
-	const id = `child-widget-${process.pid}-${Date.now().toString(36)}`;
-	let buffer = "";
-	socket.on("connect", () =>
-		socket.write(JSON.stringify({ id, action: "subscribeWidget" }) + "\n"),
-	);
-	socket.on("data", (chunk) => {
-		buffer += chunk.toString("utf8");
-		while (true) {
-			const i = buffer.indexOf("\n");
-			if (i < 0) break;
-			const line = buffer.slice(0, i);
-			buffer = buffer.slice(i + 1);
-			if (!line.trim()) continue;
-			try {
-				const msg = JSON.parse(line);
-				if (msg.type === "widgetSnapshot" && msg.snapshot) {
-					onSnapshot(msg.snapshot);
-				}
-			} catch {}
-		}
-	});
-	const clear = () => {
-		if (childWidgetSocket === socket) childWidgetSocket = null;
+	return {
+		...result,
+		services,
+		diagnostics: services.diagnostics,
 	};
-	socket.once("close", clear);
-	socket.once("error", clear);
-}
+};
 
-async function listSessions(): Promise<SessionInfo[]> {
-	return [...sessions.values()]
-		.filter((session) => session.state === "running")
-		.map(publicSession);
-}
+class PiSessionsHost {
+	activeId = PARENT_SESSION_ID;
+	records = new Map<string, LiveSessionRecord>();
+	subscribers = new Set<() => void>();
+	locks = new LockManager();
+	parentTui: any = null;
+	parentDone: (() => void) | null = null;
+	parentHandoffActive = false;
+	activationInProgress: Promise<void> | null = null;
+	queuedActivation: string | null = null;
 
-async function selectorSessions(ctx: CommandContext): Promise<SessionInfo[]> {
-	return [
-		{
+	constructor() {
+		this.records.set(PARENT_SESSION_ID, {
 			id: PARENT_SESSION_ID,
+			kind: "parent",
 			name: "parent",
-			cwd: ctx.cwd || process.cwd(),
-			state: "idle",
+			cwd: process.cwd(),
+			state: "active",
+			activity: "idle",
+			createdAt: Date.now(),
+			lastActivityAt: Date.now(),
 			status: "parent",
 			pid: process.pid,
-			lastActivityAt: 0,
-			agentStatus: state.parentAgentStatus || "idle",
-			transcript: resolveTranscriptName(
+		});
+	}
+
+	get(id: string): LiveSessionRecord | undefined {
+		return (
+			this.records.get(id) ||
+			[...this.records.values()].find((r) => r.name === id)
+		);
+	}
+
+	subscribe(listener: () => void): () => void {
+		this.subscribers.add(listener);
+		return () => this.subscribers.delete(listener);
+	}
+
+	notify(): void {
+		for (const listener of [...this.subscribers]) {
+			try {
+				listener();
+			} catch {}
+		}
+	}
+
+	publicSession(record: LiveSessionRecord): any {
+		return {
+			id: record.id,
+			name: record.name,
+			cwd: record.cwd,
+			state: record.state,
+			status: record.status || record.state,
+			pid: process.pid,
+			lastActivityAt: record.lastActivityAt,
+			agentStatus: record.activity || "idle",
+			transcript: record.transcript || "",
+		};
+	}
+
+	snapshot(): any {
+		return {
+			attached: this.activeId,
+			updatedAt: Date.now(),
+			sessions: this.listLive().map((r) => this.publicSession(r)),
+		};
+	}
+
+	listLive(): LiveSessionRecord[] {
+		const parent = this.records.get(PARENT_SESSION_ID);
+		const children = [...this.records.values()].filter(
+			(r) => r.kind === "child" && !["stopped", "error"].includes(r.state),
+		);
+		return [parent, ...children].filter(Boolean);
+	}
+
+	registerParent(ctx: CommandContext): void {
+		const record = this.records.get(PARENT_SESSION_ID)!;
+		record.cwd = ctx.cwd || process.cwd();
+		record.context = ctx;
+		record.sessionManager = ctx.sessionManager;
+		record.sessionFile = ctx.sessionManager?.getSessionFile?.();
+		record.sessionId = ctx.sessionManager?.getSessionId?.();
+		record.transcript = resolveTranscriptName(
+			ctx.sessionManager?.getSessionName?.(),
+			record.sessionFile,
+		);
+		record.lastActivityAt = Date.now();
+		if (this.activeId === PARENT_SESSION_ID) record.state = "active";
+		this.notify();
+	}
+
+	bindSessionContext(ctx: CommandContext): LiveSessionRecord {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		const sessionFile = ctx.sessionManager?.getSessionFile?.();
+		const child = [...this.records.values()].find(
+			(r) =>
+				r.kind === "child" &&
+				((sessionId && r.sessionId === sessionId) ||
+					(sessionFile && r.sessionFile === sessionFile)),
+		);
+		if (child) {
+			child.context = ctx;
+			child.cwd = ctx.cwd || child.cwd;
+			child.sessionManager = ctx.sessionManager || child.sessionManager;
+			child.sessionId = sessionId || child.sessionId;
+			child.sessionFile = sessionFile || child.sessionFile;
+			child.transcript = resolveTranscriptName(
 				ctx.sessionManager?.getSessionName?.(),
-				ctx.sessionManager?.getSessionFile?.(),
+				child.sessionFile,
+			);
+			child.lastActivityAt = Date.now();
+			this.notify();
+			return child;
+		}
+		this.registerParent(ctx);
+		return this.records.get(PARENT_SESSION_ID)!;
+	}
+
+	updateActivity(ctx: CommandContext, activity: Activity): void {
+		const record = this.bindSessionContext(ctx);
+		record.activity = activity;
+		record.lastActivityAt = Date.now();
+		this.notify();
+	}
+
+	currentContextId(ctx: CommandContext): string {
+		return this.bindSessionContext(ctx).id;
+	}
+
+	async createChildFromContext(
+		ctx: CommandContext,
+		cwd: string,
+	): Promise<LiveSessionRecord> {
+		const parent = this.bindSessionContext(ctx);
+		const name = sessionNameForCwd(cwd);
+		const sessionManager = SessionManager.create(cwd, undefined, {
+			parentSession:
+				ctx.sessionManager?.getSessionFile?.() || parent.sessionFile,
+		});
+		sessionManager.appendSessionInfo(name);
+		sessionManager.appendCustomEntry("pi-sessions.child", {
+			parentSessionFile:
+				ctx.sessionManager?.getSessionFile?.() || parent.sessionFile,
+			parentSessionId: ctx.sessionManager?.getSessionId?.() || parent.sessionId,
+			parentLeafId:
+				ctx.sessionManager?.getLeafId?.() || parent.parentLeafId || null,
+			parentName: parent.name,
+			createdAt: new Date().toISOString(),
+		});
+		return await this.createRecordForSessionManager({
+			name,
+			cwd,
+			sessionManager,
+			parent,
+		});
+	}
+
+	async openSavedSessionAsLive(
+		sessionPath: string,
+		cwdOverride?: string,
+	): Promise<LiveSessionRecord> {
+		const existing = [...this.records.values()].find(
+			(r) =>
+				r.kind === "child" &&
+				r.sessionFile === sessionPath &&
+				!["stopped", "error"].includes(r.state),
+		);
+		if (existing) return existing;
+		const sessionManager = SessionManager.open(
+			sessionPath,
+			undefined,
+			cwdOverride,
+		);
+		const cwd = sessionManager.getCwd?.() || cwdOverride || process.cwd();
+		const name = sanitizeName(
+			sessionManager.getSessionName?.() ||
+				path.basename(cwd) ||
+				sessionManager.getSessionId?.(),
+		);
+		return await this.createRecordForSessionManager({
+			name,
+			cwd,
+			sessionManager,
+		});
+	}
+
+	private async createRecordForSessionManager(opts: {
+		name: string;
+		cwd: string;
+		sessionManager: any;
+		parent?: LiveSessionRecord;
+	}): Promise<LiveSessionRecord> {
+		const id = `${sanitizeName(opts.name)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+		const record: LiveSessionRecord = {
+			id,
+			kind: "child",
+			name: sanitizeName(opts.name),
+			cwd: opts.cwd,
+			state: "starting",
+			activity: "idle",
+			sessionManager: opts.sessionManager,
+			sessionFile: opts.sessionManager.getSessionFile?.(),
+			sessionId: opts.sessionManager.getSessionId?.(),
+			parentSessionFile: opts.parent?.sessionFile,
+			parentLeafId: opts.parent?.sessionManager?.getLeafId?.() || null,
+			createdAt: Date.now(),
+			lastActivityAt: Date.now(),
+			transcript: resolveTranscriptName(
+				opts.sessionManager.getSessionName?.(),
+				opts.sessionManager.getSessionFile?.(),
 			),
-		},
-		...(await listSessions()),
-	];
-}
+		};
+		this.records.set(id, record);
+		this.notify();
+		const runtime = await createAgentSessionRuntime(createRuntime, {
+			cwd: opts.cwd,
+			agentDir: getAgentDir(),
+			sessionManager: opts.sessionManager,
+			sessionStartEvent: { type: "session_start", reason: "startup" } as any,
+		});
+		const mode = new InteractiveMode(runtime, {
+			migratedProviders: [],
+			modelFallbackMessage: runtime.modelFallbackMessage,
+			initialMessage: undefined,
+			initialImages: [],
+			initialMessages: [],
+		});
+		record.runtime = runtime;
+		record.mode = mode;
+		record.adapter = new InteractiveModeAdapter(id, runtime, mode, this);
+		record.state = "suspended";
+		record.transcript = resolveTranscriptName(
+			opts.sessionManager.getSessionName?.(),
+			opts.sessionManager.getSessionFile?.(),
+		);
+		this.notify();
+		return record;
+	}
 
-function disposePtyData(disposable: any): void {
-	try {
-		if (typeof disposable === "function") disposable();
-		else disposable?.dispose?.();
-	} catch {}
-}
+	async stopChild(nameOrId: string): Promise<void> {
+		const record = this.get(nameOrId);
+		if (!record || record.kind !== "child")
+			throw new Error("session not found");
+		const wasActive = this.activeId === record.id;
+		record.expectedStop = true;
+		record.state = "stopped";
+		record.status = "stopped";
+		this.locks.release(record.id);
+		try {
+			if (wasActive) record.adapter?.suspend();
+			await record.adapter?.dispose();
+		} catch {}
+		this.records.delete(record.id);
+		this.notify();
+		if (wasActive) await this.activate(PARENT_SESSION_ID);
+	}
 
-async function attachSession(ctx: CommandContext, name: string): Promise<void> {
-	const first = findSession(name);
-	if (!first) throw new Error(`session not found: ${name}`);
-	attachedSession = first.name;
-	broadcastWidgetSnapshot();
+	async activate(targetIdOrName: string): Promise<void> {
+		const target = this.get(targetIdOrName);
+		if (!target) throw new Error(`session not found: ${targetIdOrName}`);
+		if (this.activationInProgress) {
+			this.queuedActivation = target.id;
+			await this.activationInProgress;
+			return;
+		}
+		this.activationInProgress = this.doActivate(target).finally(() => {
+			this.activationInProgress = null;
+		});
+		await this.activationInProgress;
+		const queued = this.queuedActivation;
+		this.queuedActivation = null;
+		if (queued && queued !== this.activeId) await this.activate(queued);
+	}
 
-	await ctx.ui.custom(
-		(tui: any, _theme: any, _keybindings: any, done: () => void) => {
-			let current: any = null;
-			let ptyDataDisposable: any = null;
-			let closed = false;
-			const wasRaw = Boolean(process.stdin.isRaw);
+	private async doActivate(target: LiveSessionRecord): Promise<void> {
+		if (target.id === this.activeId) return;
+		const current = this.get(this.activeId);
+		if (current?.kind === "child") current.adapter?.suspend();
+		if (current?.kind === "parent") current.state = "suspended";
 
-			const resize = () => {
-				const target = findSession(attachedSession);
-				if (!target) return;
-				resizeSession(
-					target.name,
-					process.stdout.columns || target.cols || 120,
-					process.stdout.rows || target.rows || 40,
-				);
-			};
+		if (target.kind === "parent") {
+			this.activeId = PARENT_SESSION_ID;
+			target.state = "active";
+			try {
+				this.parentTui?.terminal?.setProgress?.(false);
+				this.parentTui?.start?.();
+				this.parentTui?.requestRender?.(true);
+			} catch {}
+			const done = this.parentDone;
+			this.parentTui = null;
+			this.parentDone = null;
+			this.parentHandoffActive = false;
+			this.notify();
+			done?.();
+			return;
+		}
 
-			const close = () => {
-				if (closed) return;
-				closed = true;
-				disposePtyData(ptyDataDisposable);
-				for (const session of sessions.values())
-					session.subscribers.delete(refresh);
-				process.stdin.off("data", onInput);
-				process.stdout.off?.("resize", resize);
-				if (process.stdin.setRawMode) process.stdin.setRawMode(wasRaw);
-				process.stdout.write("\x1b[2J\x1b[H");
-				tui.start();
-				tui.requestRender(true);
-				done();
-			};
+		this.activeId = target.id;
+		target.state = "active";
+		if (!target.started) target.adapter?.start();
+		else target.adapter?.resume();
+		this.notify();
+	}
 
-			const switchTo = (next: any) => {
-				if (next === current) return;
-				disposePtyData(ptyDataDisposable);
-				current = next;
-				attachedSession = next.name;
-				broadcastWidgetSnapshot();
-				resize();
-				process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
-				if (next.replay)
-					process.stdout.write(stripTerminalKeyboardControls(next.replay));
-				// Strip keyboard protocol and modifyOtherKeys controls from child PTY
-				// output before it reaches the real terminal. This must apply to both
-				// replay and live data; otherwise child startup sequences buffered
-				// before attach can re-enable Kitty protocol and leak key-release CSI.
-				ptyDataDisposable = next.pty.onData((data: string) => {
-					process.stdout.write(stripTerminalKeyboardControls(data));
+	async enterFromParent(ctx: CommandContext, targetId: string): Promise<void> {
+		if (this.parentHandoffActive) return this.activate(targetId);
+		await ctx.ui.custom(
+			(tui: any, _theme: any, _keybindings: any, done: () => void) => {
+				this.parentTui = tui;
+				this.parentDone = done;
+				this.parentHandoffActive = true;
+				try {
+					tui.stop();
+					resetExtendedKeyboardModesForHandoff();
+				} catch {}
+				void this.activate(targetId).catch((error) => {
+					try {
+						tui.start();
+						tui.requestRender(true);
+					} catch {}
+					this.parentHandoffActive = false;
+					this.parentTui = null;
+					this.parentDone = null;
+					ctx.ui.notify(String(error?.message || error), "error");
+					done();
 				});
-			};
+				return { render: () => [], invalidate: () => {}, dispose: () => {} };
+			},
+		);
+	}
 
-			function refresh() {
-				if (closed) return;
-				const next = findSession(attachedSession);
-				if (!next || next.state !== "running") {
-					attachedSession = null;
-					broadcastWidgetSnapshot();
-					close();
-					return;
-				}
-				switchTo(next);
-			}
+	async activateFromContext(
+		ctx: CommandContext,
+		targetId: string,
+	): Promise<void> {
+		const current = this.currentContextId(ctx);
+		if (current === PARENT_SESSION_ID && targetId !== PARENT_SESSION_ID) {
+			await this.enterFromParent(ctx, targetId);
+		} else {
+			await this.activate(targetId);
+		}
+	}
+}
 
-			function onInput(chunk: Buffer | string) {
-				const target = findSession(attachedSession);
-				if (!target || target.state !== "running") return;
-				target.pty.write(
-					Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk,
-				);
-			}
+function getHost(): PiSessionsHost {
+	const g = globalThis as any;
+	if (!g[HOST_KEY]) g[HOST_KEY] = new PiSessionsHost();
+	return g[HOST_KEY];
+}
 
-			tui.stop();
-			if (process.stdin.setRawMode) process.stdin.setRawMode(true);
-			process.stdin.resume();
-			process.stdin.on("data", onInput);
-			process.stdout.on?.("resize", resize);
-			for (const session of sessions.values()) session.subscribers.add(refresh);
-			refresh();
+function installWidget(ctx: CommandContext, host: PiSessionsHost): void {
+	ctx.ui.setWidget("pi-sessions", (tui: any, theme: any) => {
+		const requestRender = () => tui.requestRender();
+		const unsubscribe = host.subscribe(requestRender);
+		const widget = new SessionWidget(
+			theme,
+			() => host.snapshot(),
+			requestRender,
+		);
+		return {
+			render: (width: number) => widget.render(width),
+			invalidate: () => widget.invalidate(),
+			dispose: () => {
+				unsubscribe();
+				widget.dispose();
+			},
+		};
+	});
+}
 
-			return { render: () => [], invalidate: () => {}, dispose: close };
-		},
+async function getResumeSessions(): Promise<any[]> {
+	const sessions = await SessionManager.listAll();
+	return sessions.sort(
+		(a: any, b: any) => Number(b.modified) - Number(a.modified),
 	);
-
-	ctx.ui.notify("Detached from pi-sessions child.", "info");
 }
 
-async function openSessions(ctx: CommandContext): Promise<void> {
+async function openSessions(
+	ctx: CommandContext,
+	host: PiSessionsHost,
+): Promise<void> {
+	let targetToActivate: string | null = null;
+	let targetToKill: string | null = null;
 	await showSessionsView(ctx, {
-		getSessions: () => selectorSessions(ctx),
-		getAttached: () => attachedSession,
+		getSessions: async () =>
+			host.listLive().map((record) => host.publicSession(record)),
+		getResumeSessions,
+		getAttached: () => host.activeId,
 		getCwd: () => ctx.cwd || process.cwd(),
-		switchTo: async (name: string) => {
-			if (name === PARENT_SESSION_ID || name === "parent") {
-				attachedSession = null;
-				broadcastWidgetSnapshot();
-				return;
-			}
-			attachedSession = name;
-			broadcastWidgetSnapshot();
-			setTimeout(() => void attachSession(ctx, name), 0);
+		switchTo: async (nameOrId: string) => {
+			const target = host.get(
+				nameOrId === "parent" ? PARENT_SESSION_ID : nameOrId,
+			);
+			if (!target) throw new Error(`session not found: ${nameOrId}`);
+			targetToActivate = target.id;
 		},
 		newSession: async () => {
-			const base = path.basename(ctx.cwd || process.cwd()) || "session";
-			const session = createSession({
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd: ctx.cwd,
-			});
-			attachedSession = session.name;
-			broadcastWidgetSnapshot();
-			setTimeout(() => void attachSession(ctx, session.name), 0);
+			const child = await host.createChildFromContext(
+				ctx,
+				ctx.cwd || process.cwd(),
+			);
+			targetToActivate = child.id;
 		},
 		newSessionInFolder: async (cwd: string) => {
-			const base = path.basename(cwd) || "session";
-			const session = createSession({
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd,
-			});
-			attachedSession = session.name;
-			broadcastWidgetSnapshot();
-			setTimeout(() => void attachSession(ctx, session.name), 0);
+			const child = await host.createChildFromContext(ctx, cwd);
+			targetToActivate = child.id;
 		},
-		resumeSession: async () => {
-			const base = path.basename(ctx.cwd || process.cwd()) || "session";
-			const session = createSession({
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd: ctx.cwd,
-				resume: true,
-			});
-			attachedSession = session.name;
-			broadcastWidgetSnapshot();
-			setTimeout(() => void attachSession(ctx, session.name), 0);
+		resumeSession: async (sessionPath?: string) => {
+			if (!sessionPath) {
+				const sessions = await getResumeSessions();
+				sessionPath = sessions[0]?.path;
+			}
+			if (!sessionPath) throw new Error("No saved sessions found");
+			const child = await host.openSavedSessionAsLive(sessionPath);
+			targetToActivate = child.id;
 		},
 		killSession: async (name: string) => {
-			stopSession(name);
+			targetToKill = name;
 		},
 		notify: (message: string, type?: "info" | "warning" | "error") =>
 			ctx.ui.notify(message, type || "info"),
 	});
-}
-
-async function openChildSessions(ctx: CommandContext): Promise<void> {
-	await showSessionsView(ctx, {
-		getSessions: async () => {
-			const [data, cwdData] = await Promise.all([
-				bridgeCall("listSessions"),
-				bridgeCall("getCwd"),
-			]);
-			return [
-				{
-					id: PARENT_SESSION_ID,
-					name: "parent",
-					cwd: cwdData.cwd || "",
-					state: "idle",
-					status: "parent",
-					pid: null,
-					lastActivityAt: 0,
-					agentStatus: cwdData.parentAgentStatus || "idle",
-					transcript: cwdData.parentTranscript || "",
-				},
-				...(data.sessions || []),
-			];
-		},
-		getAttached: () => process.env.PI_SESSIONS_SESSION_NAME || null,
-		getCwd: () => ctx.cwd || process.cwd(),
-		switchTo: async (name: string) => {
-			if (name === PARENT_SESSION_ID || name === "parent") {
-				await bridgeCall("detach", {
-					from: process.env.PI_SESSIONS_SESSION_NAME,
-				});
-				return;
-			}
-			await bridgeCall("switch", {
-				target: name,
-				from: process.env.PI_SESSIONS_SESSION_NAME,
-			});
-		},
-		newSession: async () => {
-			const base = path.basename(ctx.cwd || process.cwd()) || "session";
-			await bridgeCall("createSession", {
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd: ctx.cwd,
-				resume: false,
-			});
-		},
-		newSessionInFolder: async (cwd: string) => {
-			const base = path.basename(cwd) || "session";
-			await bridgeCall("createSession", {
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd,
-				resume: false,
-			});
-		},
-		resumeSession: async () => {
-			const base = path.basename(ctx.cwd || process.cwd()) || "session";
-			await bridgeCall("createSession", {
-				name: `${base}-${Date.now().toString(36).slice(-5)}`,
-				cwd: ctx.cwd,
-				resume: true,
-			});
-		},
-		killSession: async (name: string) => {
-			await bridgeCall("killSession", { name });
-		},
-		notify: (message: string, type?: "info" | "warning" | "error") =>
-			ctx.ui.notify(message, type || "info"),
-	});
+	if (targetToKill) {
+		await host.stopChild(targetToKill);
+		return;
+	}
+	if (!targetToActivate || targetToActivate === host.activeId) return;
+	await host.activateFromContext(ctx, targetToActivate);
 }
 
 export default function (pi: ExtensionAPI) {
-	const childMode = process.env.PI_SESSIONS_CHILD === "1";
-
-	if (childMode) {
-		pi.registerCommand("sessions", {
-			description: "Open the parent pi-sessions switcher",
-			handler: async (_args: string, ctx: CommandContext) =>
-				openChildSessions(ctx),
-		});
-		pi.registerShortcut("ctrl+r", {
-			description: "Open sessions switcher",
-			handler: async (ctx: CommandContext) => openChildSessions(ctx),
-		});
-		pi.on("session_start", (_event: any, ctx: CommandContext) => {
-			ctx.ui.setWidget("pi-sessions", (tui: any, theme: any) => {
-				const requestRender = () => tui.requestRender();
-				subscribeWidgetSnapshots((snapshot) => {
-					childWidgetSnapshot = snapshot;
-					requestRender();
-				});
-				return new SessionWidget(
-					theme,
-					() => childWidgetSnapshot,
-					requestRender,
-				);
-			});
-			const transcript = resolveTranscriptName(
-				ctx.sessionManager?.getSessionName?.(),
-				ctx.sessionManager?.getSessionFile?.(),
-			);
-			if (transcript) {
-				bridgeCall("transcriptUpdate", {
-					sessionName: process.env.PI_SESSIONS_SESSION_NAME,
-					sessionId: process.env.PI_SESSIONS_SESSION_ID,
-					transcript,
-				}).catch(() => {});
-			}
-		});
-		pi.on("agent_start", () => {
-			bridgeCall("statusUpdate", {
-				sessionName: process.env.PI_SESSIONS_SESSION_NAME,
-				sessionId: process.env.PI_SESSIONS_SESSION_ID,
-				status: "working",
-			}).catch(() => {});
-		});
-		pi.on("agent_end", () => {
-			bridgeCall("statusUpdate", {
-				sessionName: process.env.PI_SESSIONS_SESSION_NAME,
-				sessionId: process.env.PI_SESSIONS_SESSION_ID,
-				status: "idle",
-			}).catch(() => {});
-		});
-		pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
-			ctx.ui.setWidget("pi-sessions", undefined);
-			childWidgetSocket?.destroy();
-			childWidgetSocket = null;
-		});
-		return;
-	}
-
-	startBridgeServer();
-	pi.on("session_start", (_event: any, ctx: CommandContext) => {
-		state.parentCwd = ctx.cwd;
-		state.parentTranscript = resolveTranscriptName(
-			ctx.sessionManager?.getSessionName?.(),
-			ctx.sessionManager?.getSessionFile?.(),
-		);
-		ctx.ui.setWidget("pi-sessions", (tui: any, theme: any) => {
-			const requestRender = () => tui.requestRender();
-			parentWidgetRenders.add(requestRender);
-			const widget = new SessionWidget(theme, widgetSnapshot, requestRender);
-			return {
-				render: (width: number) => widget.render(width),
-				invalidate: () => widget.invalidate(),
-				dispose: () => {
-					parentWidgetRenders.delete(requestRender);
-					widget.dispose();
-				},
-			};
-		});
-		broadcastWidgetSnapshot();
-	});
-	pi.on("agent_start", () => {
-		state.parentAgentStatus = "working";
-		broadcastWidgetSnapshot();
-	});
-	pi.on("agent_end", () => {
-		state.parentAgentStatus = "idle";
-		broadcastWidgetSnapshot();
-	});
-	pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
-		ctx.ui.setWidget("pi-sessions", undefined);
-		for (const socket of widgetSubscribers) socket.destroy();
-		widgetSubscribers.clear();
-		parentWidgetRenders.clear();
-		for (const session of sessions.values()) session.pty?.kill("SIGTERM");
-		sessions.clear();
-		try {
-			bridgeServer?.close();
-			if (fs.existsSync(bridgeSocketPath)) fs.unlinkSync(bridgeSocketPath);
-		} catch {}
-	});
+	const host = getHost();
 
 	pi.registerCommand("sessions", {
 		description: "Open the pi-sessions switcher",
-		handler: async (_args: string, ctx: CommandContext) => openSessions(ctx),
+		handler: async (_args: string, ctx: CommandContext) =>
+			openSessions(ctx, host),
 	});
 
 	pi.registerShortcut("ctrl+r", {
 		description: "Open sessions switcher",
-		handler: async (ctx: CommandContext) => openSessions(ctx),
+		handler: async (ctx: CommandContext) => openSessions(ctx, host),
+	});
+
+	pi.on("session_start", (_event: any, ctx: CommandContext) => {
+		host.bindSessionContext(ctx);
+		installWidget(ctx, host);
+	});
+
+	pi.on("agent_start", (_event: any, ctx: CommandContext) => {
+		host.updateActivity(ctx, "working");
+	});
+
+	pi.on("agent_end", (_event: any, ctx: CommandContext) => {
+		host.updateActivity(ctx, "idle");
+	});
+
+	pi.on("tool_call", async (event: any, ctx: CommandContext) => {
+		const record = host.bindSessionContext(ctx);
+		const reason = needsPermission(event.toolName, event.input, record.name);
+		if (reason) {
+			if (record.id !== host.activeId) record.activity = "waiting";
+			const ok = await ctx.ui.confirm("pi-sessions permission", reason, {
+				timeout: 60000,
+			} as any);
+			if (!ok)
+				return {
+					block: true,
+					reason: "Denied by pi-sessions permission routing",
+				};
+		}
+		const paths = inferToolPaths(event.toolName, event.input);
+		if (!paths.length) return undefined;
+		const result = host.locks.acquire(record.id, paths, ctx.cwd || record.cwd);
+		if (!result.ok) {
+			return {
+				block: true,
+				reason: `pi-sessions path lock conflict: ${JSON.stringify(result.conflicts)}`,
+			};
+		}
+		host.locks.heldByToolCall.set(event.toolCallId, {
+			sessionId: record.id,
+			paths: result.paths,
+		});
+		return undefined;
+	});
+
+	pi.on("tool_result", async (event: any) => {
+		host.locks.releaseByToolCall(event.toolCallId);
+		return undefined;
+	});
+
+	pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
+		const record = host.bindSessionContext(ctx);
+		host.locks.release(record.id);
+		try {
+			ctx.ui.setWidget("pi-sessions", undefined);
+		} catch {}
+		host.notify();
 	});
 }
