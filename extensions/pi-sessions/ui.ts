@@ -772,7 +772,7 @@ class SessionsView {
 		);
 
 		lines.push(border());
-		lines.push(accent(padVisible(`${prefix}${renderedInput}`, width)));
+		lines.push(accent(fits(width, `${prefix}${renderedInput}`)));
 		lines.push(border("dim"));
 
 		if (this.error) {
