@@ -751,7 +751,7 @@ class ResumeSessionPicker implements Component, Focusable {
 		lines.push(border());
 		lines.push(
 			padVisible(
-				dim("↑/<C-p><C-n>") +
+				dim("↑↓/<C-p>/<C-n>") +
 					muted(" move · ") +
 					dim("<enter>") +
 					muted(" resume · ") +
@@ -1060,7 +1060,7 @@ class SessionsView {
 		lines.push(border());
 		lines.push(
 			padVisible(
-				dim("↑/<C-p><C-n>") +
+				dim("↑↓/<C-p>/<C-n>") +
 					muted(" move · ") +
 					dim("<enter>") +
 					muted(" switch · ") +
