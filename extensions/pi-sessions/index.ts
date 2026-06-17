@@ -462,27 +462,12 @@ class PiSessionsHost {
 		ctx: CommandContext,
 		cwd: string,
 	): Promise<LiveSessionRecord> {
-		const parent = this.bindSessionContext(ctx);
-		const name = sessionNameForCwd(cwd);
-		const sessionManager = SessionManager.create(cwd, undefined, {
-			parentSession:
-				ctx.sessionManager?.getSessionFile?.() || parent.sessionFile,
-		});
-		sessionManager.appendSessionInfo(name);
-		sessionManager.appendCustomEntry("pi-sessions.child", {
-			parentSessionFile:
-				ctx.sessionManager?.getSessionFile?.() || parent.sessionFile,
-			parentSessionId: ctx.sessionManager?.getSessionId?.() || parent.sessionId,
-			parentLeafId:
-				ctx.sessionManager?.getLeafId?.() || parent.parentLeafId || null,
-			parentName: parent.name,
-			createdAt: new Date().toISOString(),
-		});
+		this.bindSessionContext(ctx);
+		const sessionManager = SessionManager.create(cwd, undefined, {});
 		return await this.createRecordForSessionManager({
-			name,
+			name: path.basename(cwd || process.cwd()) || "session",
 			cwd,
 			sessionManager,
-			parent,
 		});
 	}
 
