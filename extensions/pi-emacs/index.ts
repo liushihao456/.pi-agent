@@ -30,8 +30,9 @@ type EmacsState = {
 	serverStartPromise?: Promise<void>;
 	watchdogPid?: number;
 	processShutdownHandlerVersion?: number;
-	lastEditedFile?: string;
 };
+
+const perSessionLastEditedFile = new Map<string, string>();
 
 type SpawnOptions = {
 	cwd?: string;
@@ -320,18 +321,23 @@ function expressionForPath(targetPath: string) {
 		: findFileExpression(targetPath);
 }
 
-function emacsClientArgs(cwd: string) {
-	return state.lastEditedFile
-		? ["-nw", "-a", "", "-e", findFileExpression(state.lastEditedFile)]
-		: ["-nw", "-a", "", "-e", diredExpression(cwd)];
+function emacsClientArgs(ctx: ExtensionContext) {
+	const sessionId = ctx.sessionManager?.getSessionId();
+	const lastEdited = sessionId ? perSessionLastEditedFile.get(sessionId) : undefined;
+	return lastEdited
+		? ["-nw", "-a", "", "-e", findFileExpression(lastEdited)]
+		: ["-nw", "-a", "", "-e", diredExpression(ctx.cwd)];
 }
 
-function rememberEditedFile(input: unknown, cwd: string) {
+function rememberEditedFile(input: unknown, ctx: ExtensionContext) {
 	const filePath = (input as { path?: string }).path;
 	if (!filePath) return;
-	state.lastEditedFile = isAbsolute(filePath)
-		? filePath
-		: resolve(cwd, filePath);
+	const sessionId = ctx.sessionManager?.getSessionId();
+	if (!sessionId) return;
+	perSessionLastEditedFile.set(
+		sessionId,
+		isAbsolute(filePath) ? filePath : resolve(ctx.cwd, filePath),
+	);
 }
 
 function fits(width: number, text: string): string {
@@ -986,13 +992,14 @@ async function openEmacsWithArgs(
 }
 
 async function openEmacsClient(ctx: ExtensionContext) {
-	await openEmacsWithArgs(ctx, emacsClientArgs(ctx.cwd));
+	await openEmacsWithArgs(ctx, emacsClientArgs(ctx));
 }
 
 async function openEmacsPath(ctx: ExtensionContext, targetPath: string) {
-	state.lastEditedFile = statSync(targetPath).isDirectory()
-		? state.lastEditedFile
-		: targetPath;
+	if (!statSync(targetPath).isDirectory()) {
+		const sessionId = ctx.sessionManager?.getSessionId();
+		if (sessionId) perSessionLastEditedFile.set(sessionId, targetPath);
+	}
 	await openEmacsWithArgs(ctx, [
 		"-nw",
 		"-a",
@@ -1034,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", (event, ctx) => {
 		if (!event.isError && ["edit", "write"].includes(event.toolName)) {
-			rememberEditedFile(event.input, ctx.cwd);
+			rememberEditedFile(event.input, ctx);
 		}
 	});
 
