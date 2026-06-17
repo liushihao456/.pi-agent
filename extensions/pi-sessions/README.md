@@ -2,13 +2,31 @@
 
 `pi-sessions` turns one Pi process into an in-process live-session multiplexer.
 
-Multiple Pi sessions can stay alive concurrently. Exactly one session owns the terminal at a time. Switching away stops only the inactive TUI, not its agent runtime.
+Multiple Pi sessions can stay alive concurrently. Exactly one session owns the terminal at a time. Switching away stops only the inactive TUI, with its agent runtime still running in background.
+
+![pi-sessions switcher UI](screenshot.png)
+
+## Install
+
+```bash
+pi install npm:pi-parallel-sessions
+```
+
+Or install directly from GitHub:
+
+```bash
+pi install git:github.com/liushihao456/pi-sessions@v0.2.0
+```
 
 ## Command
 
 Only one slash command is exposed:
 
 - `/sessions` — open the session switcher.
+
+Shortcut:
+
+- `Ctrl-R` — open the same session switcher without typing `/sessions`.
 
 All session operations happen inside that switcher.
 
@@ -21,8 +39,6 @@ All session operations happen inside that switcher.
 - `Ctrl-R` — open a one-off resume flow; selecting a saved Pi session opens it as a live child and switches to it.
 - `Ctrl-K` — stop selected live child session.
 - `Esc` — close switcher.
-
-The main `/sessions` list shows only live sessions: parent plus live children. Saved sessions are not indexed or shown there.
 
 ## Runtime model
 
@@ -44,23 +60,3 @@ Child sessions are real native `InteractiveMode` instances, not embedded panels.
 All live sessions share one in-process lock manager. Before write/edit/mutating shell tools run, `pi-sessions` checks for conflicting path locks and blocks conflicting writes.
 
 This prevents two live sessions from editing the same path tree at once.
-
-## No PTY bridge
-
-The default runtime no longer uses child subprocesses, PTYs, sockets, or `worker-guard.ts`.
-
-Removed old model pieces:
-
-- `node-pty` dependency
-- `PI_SESSIONS_CHILD` subprocess mode
-- bridge socket
-- child worker guard
-- PTY attach/detach forwarding
-
-## Reload
-
-After editing extension files:
-
-```text
-/reload
-```
