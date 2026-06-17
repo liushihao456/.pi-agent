@@ -711,27 +711,41 @@ class ResumeSessionPicker implements Component, Focusable {
 				),
 			);
 		} else {
-			const nameW = 28;
-			const cwdW = 34;
 			for (let i = 0; i < visibleSessions.length; i++) {
 				const session = visibleSessions[i]!;
 				const marker = i === this.selected ? "›" : " ";
 				const title =
 					session.name || session.firstMessage || session.id.slice(0, 8);
-				const styledTitle =
+				const styledName =
 					i === this.selected
 						? accent(`${marker} ${title}`)
 						: `${marker} ${title}`;
-				const left = padVisible(styledTitle, nameW);
-				const cwd = muted(truncateToWidth(session.cwd || "", cwdW, "…"));
-				const msg = muted(
-					truncateToWidth(
-						session.firstMessage || "",
-						Math.max(0, width - nameW - cwdW - 2),
-						"…",
-					),
+
+				const cwdText = session.cwd || "";
+				const msgCountText = session.messageCount
+					? String(session.messageCount)
+					: "";
+				const timeText = session.modified ? relativeTime(session.modified) : "";
+
+				const rightParts = [];
+				if (cwdText) rightParts.push(muted(cwdText));
+				if (msgCountText && timeText)
+					rightParts.push(dim(`${msgCountText} ${timeText}`));
+				else if (msgCountText) rightParts.push(dim(msgCountText));
+				else if (timeText) rightParts.push(dim(timeText));
+				const rightText = rightParts.join("  ");
+				const rightWidth = visibleWidth(rightText);
+
+				const leftWidth = Math.max(10, width - rightWidth - 1);
+				const left = truncateToWidth(styledName, leftWidth, "…");
+				const gap = " ".repeat(
+					Math.max(1, width - visibleWidth(left) - rightWidth),
 				);
-				lines.push(padVisible(`${left}${cwd}  ${msg}`, width));
+				let line = left + gap + rightText;
+				if (i === this.selected) {
+					line = th.bg("selectedBg", line);
+				}
+				lines.push(line);
 			}
 		}
 		lines.push(border());
