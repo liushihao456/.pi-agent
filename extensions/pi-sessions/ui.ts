@@ -763,6 +763,7 @@ class SessionsView {
 	private error: string | null = null;
 	private closed = false;
 	private initialSelectionSet = false;
+	private nameWidth = 30;
 	private readonly filterInput = new Input();
 	private readonly theme: any;
 	private readonly done: () => void;
@@ -799,6 +800,7 @@ class SessionsView {
 			this.sessions = await this.actions.getSessions();
 			computeShortNames(this.sessions);
 			if (!this.initialSelectionSet) {
+				this.updateNameWidth();
 				this.selected = this.firstNonCurrentIndex();
 				this.initialSelectionSet = true;
 			}
@@ -812,9 +814,8 @@ class SessionsView {
 	}
 
 	private filteredSessions(): SessionInfo[] {
-		const query = this.filterInput.getValue().trim().toLowerCase();
-		if (!query) return this.sessions;
-		return this.sessions.filter((session) =>
+		const query = this.filterInput.getValue().trim();
+		return fuzzyFilter(this.sessions, query, (session) =>
 			[
 				session.shortName,
 				session.name,
@@ -823,7 +824,7 @@ class SessionsView {
 				session.state,
 			]
 				.filter(Boolean)
-				.some((value) => String(value).toLowerCase().includes(query)),
+				.join(" "),
 		);
 	}
 
@@ -847,6 +848,22 @@ class SessionsView {
 	private clampSelection(): void {
 		const max = Math.max(0, this.filteredSessions().length - 1);
 		this.selected = Math.max(0, Math.min(this.selected, max));
+	}
+
+	private updateNameWidth(): void {
+		const attached = this.actions.getAttached();
+		let maxW = 0;
+		for (const s of this.sessions) {
+			const isAttached =
+				s.id === PARENT_SESSION_ID
+					? !attached || attached === PARENT_SESSION_ID
+					: attached === s.name || attached === s.id;
+			const base = s.shortName || s.name;
+			const current = isAttached ? " (current)" : "";
+			const w = visibleWidth(`\u203a ${base}${current}`);
+			if (w > maxW) maxW = w;
+		}
+		this.nameWidth = Math.min(Math.max(maxW + 2, 10), 60);
 	}
 
 	private close(): void {
@@ -991,9 +1008,8 @@ class SessionsView {
 				),
 			);
 		} else {
-			const nameW = 25;
+			const nameW = this.nameWidth;
 			const stateW = 9;
-			const cwdW = 36;
 			for (let i = 0; i < visibleSessions.length; i++) {
 				const session = visibleSessions[i]!;
 				const selected = i === this.selected;
@@ -1012,11 +1028,13 @@ class SessionsView {
 				const styledLeft = padVisible(styledBase, nameW);
 				const state = this.activity(session);
 				const styledState = muted(padVisible(state, stateW));
-				const cwd = muted(truncateToWidth(session.cwd || "", cwdW, "…"));
+				const cwdText = session.cwd || "";
+				const cwdWidth = visibleWidth(cwdText);
+				const cwd = muted(cwdText);
 				const transcript = muted(
 					truncateToWidth(
 						session.transcript || "",
-						Math.max(0, width - nameW - stateW - cwdW),
+						Math.max(0, width - nameW - stateW - cwdWidth - 2),
 						"…",
 					),
 				);
