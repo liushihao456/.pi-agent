@@ -736,6 +736,11 @@ export class TerminalSplitCompositor {
 			return { consume: true };
 		}
 
+		// End key scrolls to bottom
+		if (matchesKey(data, "end") && this.jumpToRootBottom()) {
+			return { consume: true };
+		}
+
 		const keyboardDelta = parseKeyboardScrollDelta(
 			data,
 			this.keyboardScrollShortcuts,
