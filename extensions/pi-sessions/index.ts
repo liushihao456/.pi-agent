@@ -1006,10 +1006,11 @@ export default function (pi: ExtensionAPI) {
 		const record = host.bindSessionContext(ctx);
 		const reason = needsPermission(event.toolName, event.input, record.name);
 		if (reason) {
-			if (record.id !== host.activeId) record.activity = "waiting";
+			if (record.id !== host.activeId) host.updateActivity(ctx, "waiting");
 			const ok = await ctx.ui.confirm("pi-sessions permission", reason, {
 				timeout: 60000,
 			} as any);
+			if (ok && record.id !== host.activeId) host.updateActivity(ctx, "working");
 			if (!ok)
 				return {
 					block: true,
