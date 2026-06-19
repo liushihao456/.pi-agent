@@ -1,7 +1,8 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	WorkingIndicatorOptions,
+import {
+	InteractiveMode,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type CommandContext,
@@ -41,6 +42,14 @@ import {
 } from "./state.ts";
 import type { PiStatusConfig } from "./types.ts";
 
+const WORKING_UI_PATCHED = Symbol.for("pi-status:interactive-mode-working-ui-patched");
+const WORKING_UI_HANDLER = Symbol.for("pi-status:working-ui-handler");
+
+type WorkingUiHandler = {
+	setWorkingMessage?: (message?: string) => void;
+	setWorkingIndicator?: (options?: WorkingIndicatorOptions) => void;
+};
+
 export default function piStatus(pi: ExtensionAPI) {
 	let config: PiStatusConfig = readPiStatusConfig();
 	let lastCtx: ExtensionContext | undefined;
@@ -56,33 +65,44 @@ export default function piStatus(pi: ExtensionAPI) {
 		requestWidgetRender?.();
 	}
 
-	function installWorkingUiPatch(ctx: ExtensionContext) {
-		const messageKey = Symbol.for("pi-status:original-set-working-message");
-		const indicatorKey = Symbol.for("pi-status:original-set-working-indicator");
-		const ui = ctx.ui as typeof ctx.ui & Record<symbol, unknown>;
+	function installWorkingUiPrototypePatch(): void {
+		const g = globalThis as typeof globalThis & Record<symbol, unknown>;
+		g[WORKING_UI_HANDLER] = {
+			setWorkingMessage: (message?: string) => {
+				state.workingMessage = message;
+				requestRender();
+			},
+			setWorkingIndicator: (options?: WorkingIndicatorOptions) => {
+				state.workingIndicatorFrames = options?.frames;
+				state.workingIndicatorIntervalMs = options?.intervalMs;
+				syncAnimation();
+				requestRender();
+			},
+		} satisfies WorkingUiHandler;
 
-		const originalSetWorkingMessage =
-			(ui[messageKey] as ((message?: string) => void) | undefined) ??
-			ctx.ui.setWorkingMessage.bind(ctx.ui);
-		ui[messageKey] = originalSetWorkingMessage;
-		ctx.ui.setWorkingMessage = (message?: string) => {
-			state.workingMessage = message;
-			originalSetWorkingMessage(message);
-			requestRender();
-		};
+		const proto = (InteractiveMode as unknown as { prototype?: Record<PropertyKey, unknown> })
+			.prototype;
+		if (!proto || proto[WORKING_UI_PATCHED]) return;
 
-		const originalSetWorkingIndicator =
-			(ui[indicatorKey] as
-				| ((options?: WorkingIndicatorOptions) => void)
-				| undefined) ?? ctx.ui.setWorkingIndicator.bind(ctx.ui);
-		ui[indicatorKey] = originalSetWorkingIndicator;
-		ctx.ui.setWorkingIndicator = (options?: WorkingIndicatorOptions) => {
-			state.workingIndicatorFrames = options?.frames;
-			state.workingIndicatorIntervalMs = options?.intervalMs;
-			originalSetWorkingIndicator(options);
-			syncAnimation();
-			requestRender();
-		};
+		const originalSetWorkingMessage = proto.setWorkingMessage;
+		if (typeof originalSetWorkingMessage === "function") {
+			proto.setWorkingMessage = function (message?: string) {
+				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
+				handler?.setWorkingMessage?.(message);
+				return originalSetWorkingMessage.call(this, message);
+			};
+		}
+
+		const originalSetWorkingIndicator = proto.setWorkingIndicator;
+		if (typeof originalSetWorkingIndicator === "function") {
+			proto.setWorkingIndicator = function (options?: WorkingIndicatorOptions) {
+				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
+				handler?.setWorkingIndicator?.(options);
+				return originalSetWorkingIndicator.call(this, options);
+			};
+		}
+
+		proto[WORKING_UI_PATCHED] = true;
 	}
 
 	async function refreshProjectState(ctx: ExtensionContext) {
@@ -118,7 +138,6 @@ export default function piStatus(pi: ExtensionAPI) {
 	function installEditor(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
 		lastCtx = ctx;
-		installWorkingUiPatch(ctx);
 		ctx.ui.setWorkingVisible(false);
 		ctx.ui.setFooter(() => ({
 			render: () => [],
@@ -190,6 +209,8 @@ export default function piStatus(pi: ExtensionAPI) {
 			requestRender();
 		}, state.workingIndicatorIntervalMs ?? SPINNER_INTERVAL_MS);
 	}
+
+	installWorkingUiPrototypePatch();
 
 	const cmdCtx: CommandContext = {
 		get config() {

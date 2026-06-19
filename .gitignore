@@ -8,3 +8,4 @@
 package-lock.json
 /ayu/
 /run-history.jsonl
+.DS_Store
