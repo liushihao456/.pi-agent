@@ -69,8 +69,7 @@ function blankItem(index: number): AutocompleteItem {
 
 function completionSource(prefix: string): string {
 	if (prefix.startsWith("/")) return "slash";
-	if (prefix.length > 0) return prefix[0] ?? "unknown";
-	return "unknown";
+	return "path";
 }
 
 function padLines(lines: string[], targetHeight: number): string[] {
