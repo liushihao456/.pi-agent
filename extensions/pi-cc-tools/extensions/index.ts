@@ -67,6 +67,7 @@ const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-cust
 const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
 const RTK_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-rtk-notify");
 const WRAP_MARK = "\uE000";
+const NOWRAP_MARK = "\uE001";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
@@ -570,11 +571,19 @@ function trimAnsiLeft(text: string): string {
 }
 
 function removeGroupedToolPrefix(line: string, groupedLabel?: string): string {
-	return trimAnsiLeft(stripGroupedToolLabel(trimAnsiLeft(stripLeadingToolStatus(line)), groupedLabel));
+	// Group rendering reuses fully-rendered child tool lines. Only strip chrome
+	// from header/status lines; preserve body indentation (read gutters, grep
+	// match lists, code blocks). A blind trim breaks nested tool formatting.
+	const withoutStatus = stripLeadingToolStatus(line);
+	const statusRemoved = withoutStatus !== line;
+	const labelInput = statusRemoved ? trimAnsiLeft(withoutStatus) : withoutStatus;
+	const withoutLabel = stripGroupedToolLabel(labelInput, groupedLabel);
+	const labelRemoved = withoutLabel !== labelInput;
+	return statusRemoved || labelRemoved ? trimAnsiLeft(withoutLabel) : line;
 }
 
 function tintGroupedToolLine(line: string, _groupedLabel?: string): string {
-	return trimAnsiLeft(line);
+	return line;
 }
 
 function getToolArgSummary(tool: any): string {
@@ -641,7 +650,7 @@ function formatBranchedToolLines(lines: string[], index: number, total: number, 
 			continue;
 		}
 		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : `${branchContinuation(index, total)}  `;
-		output.push(clampLineWidth(`${prefix}${trimAnsiLeft(line)}`, width));
+		output.push(clampLineWidth(`${prefix}${line}`, width));
 	}
 	return output;
 }
@@ -2017,6 +2026,7 @@ function fileExistsForTool(cwd: string, filePath: string): boolean {
 }
 
 const WRITE_EXISTED_BEFORE = new Map<string, boolean>();
+const WRITE_OLD_CONTENT = new Map<string, string | null>();
 
 interface RtkRewriteRecord {
 	original: string;
@@ -2025,6 +2035,8 @@ interface RtkRewriteRecord {
 }
 
 const RTK_ORIGINAL_BASH_COMMANDS = new Map<string, string>();
+const RTK_ORIGINAL_TOOL_PREVIEWS = new Map<string, string>();
+const RTK_ORIGINAL_TOOL_PREVIEW_ALIASES = new Map<string, string[]>();
 const RTK_REWRITES_BY_TOOL_ID = new Map<string, RtkRewriteRecord>();
 const RTK_PENDING_REWRITES: RtkRewriteRecord[] = [];
 const RTK_PENDING_REWRITE_LIMIT = 20;
@@ -2072,7 +2084,7 @@ function rtkPreviewMatches(command: string, preview: string): boolean {
 }
 
 function parseRtkRewriteNotice(message: string): RtkRewriteRecord | undefined {
-	const match = message.match(/^RTK rewrite:\s*(.*?)\s*->\s*(.+)$/s);
+	const match = message.match(/\bRTK rewrite:\s*(.*?)\s*->\s*(.+)$/is);
 	if (!match) return undefined;
 	const original = match[1]?.trim() ?? "";
 	const rewritten = match[2]?.trim() ?? "";
@@ -2085,9 +2097,20 @@ function rememberPendingRtkRewrite(record: RtkRewriteRecord): void {
 	while (RTK_PENDING_REWRITES.length > RTK_PENDING_REWRITE_LIMIT) RTK_PENDING_REWRITES.shift();
 }
 
+function getRtkOriginalAliases(toolCallId: string): string[] {
+	const aliases = RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.get(toolCallId) ?? [];
+	const preview = RTK_ORIGINAL_TOOL_PREVIEWS.get(toolCallId);
+	const bash = RTK_ORIGINAL_BASH_COMMANDS.get(toolCallId);
+	return [...new Set([preview, bash, ...aliases].filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
+}
+
 function findRtkRewriteToolId(record: RtkRewriteRecord): string | undefined {
-	const entries = [...RTK_ORIGINAL_BASH_COMMANDS.entries()].reverse();
-	return entries.find(([, command]) => rtkPreviewMatches(command, record.original))?.[0];
+	const toolIds = [...new Set([
+		...[...RTK_ORIGINAL_TOOL_PREVIEWS.keys()].reverse(),
+		...[...RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.keys()].reverse(),
+		...[...RTK_ORIGINAL_BASH_COMMANDS.keys()].reverse(),
+	])];
+	return toolIds.find((toolCallId) => getRtkOriginalAliases(toolCallId).some((preview) => rtkPreviewMatches(preview, record.original)));
 }
 
 function rememberRtkRewrite(record: RtkRewriteRecord): void {
@@ -2109,16 +2132,17 @@ function takePendingRtkRewrite(originalCommand: string | undefined, currentComma
 	return record;
 }
 
-function ensureRtkRewriteForContext(ctx: any, args: any): RtkRewriteRecord | undefined {
+function ensureRtkRewriteForContext(ctx: any, args: any, currentPreview?: string): RtkRewriteRecord | undefined {
 	if (ctx?.state?._rtkRewriteRecord) return ctx.state._rtkRewriteRecord as RtkRewriteRecord;
 	const toolCallId = typeof ctx?.toolCallId === "string" ? ctx.toolCallId : undefined;
-	const currentCommand = typeof args?.command === "string" ? args.command : undefined;
-	const originalCommand = toolCallId ? RTK_ORIGINAL_BASH_COMMANDS.get(toolCallId) : undefined;
+	const currentCommand = typeof args?.command === "string" ? args.command : currentPreview;
+	const originalAliases = toolCallId ? getRtkOriginalAliases(toolCallId) : [];
+	const originalCommand = originalAliases[0];
 	if (!toolCallId) return undefined;
 
 	let record = RTK_REWRITES_BY_TOOL_ID.get(toolCallId);
 	if (!record) {
-		record = takePendingRtkRewrite(originalCommand, currentCommand);
+		record = takePendingRtkRewrite(originalAliases.find((alias) => RTK_PENDING_REWRITES.some((pending) => rtkPreviewMatches(alias, pending.original))), currentCommand);
 		if (record) RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
 	}
 	if (!record && originalCommand && currentCommand && normalizeRtkCommandPreview(originalCommand) !== normalizeRtkCommandPreview(currentCommand)) {
@@ -2141,6 +2165,100 @@ function formatRtkRewriteDetails(record: RtkRewriteRecord, theme: Theme): string
 	].join("\n");
 }
 
+function getRtkCompaction(details: any): any | undefined {
+	const direct = details?.rtkCompaction;
+	const nested = details?.metadata?.rtkCompaction;
+	const value = direct ?? nested;
+	return value && typeof value === "object" && value.applied === true ? value : undefined;
+}
+
+function formatRtkCompactionDetails(compaction: any, theme: Theme): string {
+	const originalLines = typeof compaction.originalLineCount === "number" ? compaction.originalLineCount : undefined;
+	const compactedLines = typeof compaction.compactedLineCount === "number" ? compaction.compactedLineCount : undefined;
+	const originalChars = typeof compaction.originalCharCount === "number" ? compaction.originalCharCount : undefined;
+	const compactedChars = typeof compaction.compactedCharCount === "number" ? compaction.compactedCharCount : undefined;
+	const parts = [`${theme.fg("muted", "RTK compacted")}`];
+	if (originalLines !== undefined && compactedLines !== undefined) parts.push(`${theme.fg("muted", "lines:")} ${theme.fg("dim", `${originalLines} → ${compactedLines}`)}`);
+	if (originalChars !== undefined && compactedChars !== undefined) parts.push(`${theme.fg("muted", "chars:")} ${theme.fg("dim", `${originalChars} → ${compactedChars}`)}`);
+	return parts.join(theme.fg("dim", " · "));
+}
+
+function getGrepGroupedSummary(lines: string[]): { count: number; files?: number; header?: string } {
+	const groupedHeader = lines.find((line) => /^\d+ matches in \d+ files?:/.test(line.trim()));
+	if (groupedHeader) {
+		const match = groupedHeader.trim().match(/^(\d+) matches in (\d+) files?:/);
+		if (match) {
+			return { count: Number.parseInt(match[1] ?? "0", 10), files: Number.parseInt(match[2] ?? "0", 10), header: groupedHeader };
+		}
+	}
+	return { count: lines.length };
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightGrepMatch(content: string, args: any, theme: Theme): string {
+	const pattern = typeof args?.pattern === "string" ? args.pattern : "";
+	if (!pattern) return theme.fg("dim", content || " ");
+	try {
+		const source = args?.literal === true ? escapeRegExp(pattern) : pattern;
+		const flags = `g${args?.ignoreCase === true ? "i" : ""}`;
+		const re = new RegExp(source, flags);
+		let last = 0;
+		let out = "";
+		let matched = false;
+		for (const match of content.matchAll(re)) {
+			const index = match.index ?? 0;
+			const text = match[0] ?? "";
+			if (!text) continue;
+			out += theme.fg("dim", content.slice(last, index));
+			out += theme.fg("accent", text);
+			last = index + text.length;
+			matched = true;
+		}
+		if (!matched) return theme.fg("dim", content || " ");
+		out += theme.fg("dim", content.slice(last));
+		return out;
+	} catch {
+		return theme.fg("dim", content || " ");
+	}
+}
+
+function formatGroupedGrepPreview(lines: string[], args: any, theme: Theme): string[] {
+	const allLineNumbers = lines
+		.map((line) => line.match(/^\s*(\d+):\s?(.*)$/)?.[1])
+		.filter((lineNo): lineNo is string => typeof lineNo === "string");
+	const lineNoWidth = Math.max(3, ...allLineNumbers.map((lineNo) => lineNo.length));
+	const out: string[] = [];
+	let group: Array<{ lineNo: string; content: string }> = [];
+	const flush = (): void => {
+		if (group.length === 0) return;
+		for (const entry of group) {
+			const lineNo = entry.lineNo.padStart(lineNoWidth);
+			out.push(`${NOWRAP_MARK}${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${highlightGrepMatch(entry.content, args, theme)}`);
+		}
+		group = [];
+	};
+	for (const line of lines) {
+		const fileHeader = line.match(/^>\s+(.+?)\s+\((\d+) matches\):?\s*$/);
+		if (fileHeader) {
+			flush();
+			out.push(`${theme.fg("muted", `> ${fileHeader[1]} (${fileHeader[2]} matches)`)}`);
+			continue;
+		}
+		const matchLine = line.match(/^\s*(\d+):\s?(.*)$/);
+		if (matchLine) {
+			group.push({ lineNo: matchLine[1] ?? "", content: matchLine[2] ?? "" });
+			continue;
+		}
+		flush();
+		out.push(theme.fg("dim", line));
+	}
+	flush();
+	return out;
+}
+
 function patchRtkRewriteNotifications(ui: any): void {
 	if (!ui || ui[RTK_NOTIFY_PATCH_FLAG]) return;
 	const originalNotify = ui.notify;
@@ -2158,22 +2276,63 @@ function patchRtkRewriteNotifications(ui: any): void {
 	ui[RTK_NOTIFY_PATCH_FLAG] = true;
 }
 
-function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
-	if (typeof toolCallId !== "string") return;
-	const command = (args as any)?.command;
-	if (typeof command === "string" && command.trim()) {
-		RTK_ORIGINAL_BASH_COMMANDS.set(toolCallId, command);
+function buildGrepRtkAliases(args: any): string[] {
+	const pattern = typeof args?.pattern === "string" ? args.pattern : "";
+	if (!pattern) return [];
+	const path = typeof args?.path === "string" && args.path ? args.path : "";
+	const glob = typeof args?.glob === "string" && args.glob ? args.glob : "";
+	const type = typeof args?.type === "string" && args.type ? args.type : "";
+	const extras = [glob ? `glob ${glob}` : "", type ? `type ${type}` : "", args?.literal === true ? "literal" : ""].filter(Boolean).join(" ");
+	const quoted = JSON.stringify(pattern);
+	return [...new Set([
+		[`grep ${quoted}`, path ? `in ${path}` : "", extras].filter(Boolean).join(" "),
+		[`grep ${pattern}`, path, extras].filter(Boolean).join(" "),
+		[`rg ${quoted}`, path, extras].filter(Boolean).join(" "),
+		[`rg ${pattern}`, path, extras].filter(Boolean).join(" "),
+		[path, pattern].filter(Boolean).join(":"),
+		[path, quoted].filter(Boolean).join(" "),
+		`${quoted}${path ? ` in ${path}` : ""}`,
+		JSON.stringify(args),
+	].filter((value) => value.trim().length > 0))];
+}
+
+function buildGrepRtkPreview(args: any): string | undefined {
+	return buildGrepRtkAliases(args)[0];
+}
+
+function trackRtkOriginalToolPreview(toolName: unknown, toolCallId: unknown, args: unknown): void {
+	if (typeof toolCallId !== "string" || typeof toolName !== "string") return;
+	let preview: string | undefined;
+	if (toolName === "bash") {
+		const command = (args as any)?.command;
+		if (typeof command === "string" && command.trim()) {
+			preview = command;
+			RTK_ORIGINAL_BASH_COMMANDS.set(toolCallId, command);
+		}
+	} else if (toolName === "grep") {
+		const aliases = buildGrepRtkAliases(args);
+		preview = aliases[0];
+		if (aliases.length > 0) RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.set(toolCallId, aliases);
 	}
+	if (preview) RTK_ORIGINAL_TOOL_PREVIEWS.set(toolCallId, preview);
+}
+
+function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
+	trackRtkOriginalToolPreview("bash", toolCallId, args);
 }
 
 function forgetRtkBashCommand(toolCallId: unknown): void {
 	if (typeof toolCallId !== "string") return;
 	RTK_ORIGINAL_BASH_COMMANDS.delete(toolCallId);
+	RTK_ORIGINAL_TOOL_PREVIEWS.delete(toolCallId);
+	RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.delete(toolCallId);
 	RTK_REWRITES_BY_TOOL_ID.delete(toolCallId);
 }
 
 function clearRtkRewriteState(): void {
 	RTK_ORIGINAL_BASH_COMMANDS.clear();
+	RTK_ORIGINAL_TOOL_PREVIEWS.clear();
+	RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.clear();
 	RTK_REWRITES_BY_TOOL_ID.clear();
 	RTK_PENDING_REWRITES.length = 0;
 	clearPreservedBashPreviews();
@@ -2268,13 +2427,15 @@ function getBlinkingEntries(): BlinkEntry[] {
 		.slice(0, MAX_BLINKING_TOOLS);
 }
 
-function updateBlinkActiveStates(): void {
+function updateBlinkActiveStates(skipInvalidateKey?: any): void {
 	const activeSet = new Set(getBlinkingEntries().map((entry) => entry.key));
 	for (const entry of _blinkContexts.values()) {
 		const active = activeSet.has(entry.key);
 		if (entry.key?._blinkActive !== active) {
 			entry.key._blinkActive = active;
-			try { entry.invalidate(); } catch { /* noop */ }
+			if (entry.key !== skipInvalidateKey) {
+				try { entry.invalidate(); } catch { /* noop */ }
+			}
 		}
 	}
 }
@@ -2317,7 +2478,9 @@ function setupBlinkTimer(ctx: any): void {
 	}
 	_blinkContexts.set(key, { key, order: ++_blinkOrder, invalidate });
 	key._blinkActive = false;
-	updateBlinkActiveStates();
+	// Avoid re-entrant ToolExecutionComponent.invalidate() while updateDisplay()
+	// is still adding call/result children. Re-entry duplicates Box children.
+	updateBlinkActiveStates(key);
 	_stopGlobalBlinkTimerIfEmpty();
 	_scheduleGlobalBlinkTimer();
 }
@@ -2440,6 +2603,10 @@ function wrapMarkedLine(line: string, width: number): string[] {
 	const body = line.slice(markerIndex + WRAP_MARK.length);
 	const prefixWidth = visibleWidth(prefix);
 	const bodyWidth = Math.max(1, width - prefixWidth);
+	if (body.startsWith(NOWRAP_MARK)) {
+		const clipped = truncateToWidth(body.slice(NOWRAP_MARK.length), bodyWidth, `${FG_DIM}…${TRANSPARENT_RESET}`, false);
+		return [`${prefix}${clipped}`];
+	}
 	const wrapped = wrapTextWithAnsi(body, bodyWidth);
 	const continuation = markedContinuationPrefix(prefix);
 	return wrapped.map((part, index) => (index === 0 ? `${prefix}${part}` : `${continuation}${part}`));
@@ -2927,7 +3094,9 @@ function liveBranchDisplay(state: Record<string, unknown> | undefined, theme: Th
 	}
 	const display = state._ptDisplay;
 	if (typeof display === "string" && display.trim()) {
-		return indentBranchBlock(withBranch(stripBranchMarkupBlock(display), theme, false, true));
+		// _ptDisplay is already branch-wrapped markup. Do not strip/re-wrap it:
+		// that drops ANSI diff highlighting and leaks the internal WRAP_MARK.
+		return display;
 	}
 	return undefined;
 }
@@ -2937,12 +3106,6 @@ function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undef
 	const body = state._ptBody;
 	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
 		state._ptDisplay = indentBranchBlock(withBranch(body, theme, false, true));
-		return;
-	}
-	const display = state._ptDisplay;
-	if (typeof display === "string" && display.trim()) {
-		const stripped = stripBranchMarkupBlock(display);
-		state._ptDisplay = indentBranchBlock(withBranch(stripped, theme, false, true));
 	}
 }
 
@@ -3346,7 +3509,11 @@ function adaptiveWrapRows(tw?: number): number {
 function fit(value: string, width: number): string {
 	if (width <= 0) return "";
 	const plain = diffStrip(value);
-	if (plain.length <= width) return value + " ".repeat(width - plain.length);
+	const plainVis = visibleWidth(plain);
+	if (plainVis <= width) {
+		const pad = width - plainVis;
+		return pad > 0 ? value + " ".repeat(pad) : value;
+	}
 	const showWidth = width > 2 ? width - 1 : width;
 	let vis = 0;
 	let i = 0;
@@ -3358,7 +3525,7 @@ function fit(value: string, width: number): string {
 				continue;
 			}
 		}
-		vis++;
+		vis += visibleWidth(value[i]);
 		i++;
 	}
 	return width > 2 ? `${value.slice(0, i)}${D_RST}${FG_DIM}›${D_RST}` : `${value.slice(0, i)}${D_RST}`;
@@ -3403,8 +3570,9 @@ function normalizeShikiContrast(ansi: string): string {
 function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fillBg = ""): string[] {
 	if (width <= 0) return [""];
 	const plain = diffStrip(text);
-	if (plain.length <= width) {
-		const pad = width - plain.length;
+	const plainVis = visibleWidth(plain);
+	if (plainVis <= width) {
+		const pad = width - plainVis;
 		return pad > 0 ? [text + fillBg + " ".repeat(pad) + (fillBg ? D_RST : "")] : [text];
 	}
 
@@ -3457,7 +3625,7 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 			}
 		}
 		row += text[i];
-		vis++;
+		vis += visibleWidth(text[i]);
 		i++;
 	}
 
@@ -4165,24 +4333,22 @@ function renderEditPreviewBody(
 	lines: number[],
 	summary: string,
 ): void {
+	const commitDisplay = (body: string): void => {
+		if (ctx.state._pk !== key) return;
+		ctx.state._ptBody = body;
+		ctx.state._ptDisplay = indentBranchBlock(withBranch(body, theme, false, true));
+		ctx.state._ptDisplayKey = key;
+		delete ctx.state._ptPendingKey;
+		safeInvalidate(ctx);
+	};
 	const dc = resolveDiffColors(theme);
 	const branchWidth = branchDiffWidth();
 	if (operations.length === 1) {
 		const [diff] = diffs;
 		const line = lines[0] ?? getFirstChangedNewLine(diff);
 		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth)
-			.then((rendered) => {
-				if (ctx.state._pk !== key) return;
-				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				safeInvalidate(ctx);
-			})
-			.catch(() => {
-				if (ctx.state._pk !== key) return;
-				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				safeInvalidate(ctx);
-			});
+			.then((rendered) => commitDisplay(rendered))
+			.catch(() => commitDisplay(`${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`));
 		return;
 	}
 	const maxShown = ctx.expanded ? operations.length : Math.min(operations.length, 3);
@@ -4198,21 +4364,13 @@ function renderEditPreviewBody(
 		}),
 	)
 		.then((sections) => {
-			if (ctx.state._pk !== key) return;
 			const remainder = operations.length - maxShown;
 			const suffix = remainder > 0
 				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${toolOutputDetailHint(theme, ctx.expanded, true)}`)}`
 				: "";
-			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
-			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			safeInvalidate(ctx);
+			commitDisplay(`${sections.join("\n\n")}${suffix}`);
 		})
-		.catch(() => {
-			if (ctx.state._pk !== key) return;
-			ctx.state._ptBody = `${operations.length} edits ${summary}`;
-			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			safeInvalidate(ctx);
-		});
+		.catch(() => commitDisplay(`${operations.length} edits ${summary}`));
 }
 
 function stripThinkingPresentationArtifacts(text: string): string {
@@ -5668,7 +5826,7 @@ export default function (pi: ExtensionAPI) {
 		clearPreservedBashPreviews();
 		const toolName = (event as any)?.toolName;
 		if (toolName !== "bash") return;
-		trackRtkOriginalBashCommand((event as any)?.toolCallId, (event as any)?.args);
+		trackRtkOriginalToolPreview(toolName, (event as any)?.toolCallId, (event as any)?.args);
 	});
 
 	const cwd = process.cwd();
@@ -5724,39 +5882,62 @@ export default function (pi: ExtensionAPI) {
 			const nw = Math.max(3, String(totalLines).length);
 			const filePath = ((ctx.state as any)?._readFilePath as string) ?? "";
 			const offset = ((ctx.state as any)?._readOffset as number) ?? 0;
+			const readHLKey = `${filePath}\0${offset}\0${previewLimit()}\0${DIFF_THEME}\0${content.text.length}\0${shown.join("\n")}`;
 
-			const codeLines = shown.map((line: string, i: number) => {
-				const ln = offset + i + 1;
-				const lineNo = String(ln).padStart(nw);
-				return `${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${theme.fg("dim", line || " ")}`;
-			});
+			// Use cached highlighted text only for this exact read slice.
+			const cachedHL = (ctx.state as any)?._readHLKey === readHLKey
+				? ((ctx.state as any)?._readHL as string | undefined)
+				: undefined;
 
-			let body = codeLines.join("\n");
-			if (totalLines > shown.length) {
-				body += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
+			let codeBody: string;
+			if (cachedHL) {
+				codeBody = cachedHL;
+			} else {
+				const codeLines = shown.map((line: string, i: number) => {
+					const ln = offset + i + 1;
+					const lineNo = String(ln).padStart(nw);
+					return `${NOWRAP_MARK}${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${theme.fg("dim", line || " ")}`;
+				});
+				codeBody = codeLines.join("\n");
+				if (totalLines > shown.length) {
+					codeBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
+				}
 			}
 
-			const fullContent = `${loadInfo}\n${body}`;
+			const fullContent = `${loadInfo}\n${codeBody}`;
 			const textComp = makeText(ctx.lastComponent, withBranch(fullContent, theme));
 
-			// Async Shiki syntax highlighting
-			const lang = detectLang(filePath);
-			if (lang) {
-				codeToAnsiLazy(shown.join("\n"), lang, DIFF_THEME).then((ansi) => {
-					const hlLines = ansi.split("\n");
-					if (hlLines.length === 0) return;
-					const hlCode = hlLines.map((hlLine: string, i: number) => {
-						const ln = offset + i + 1;
-						const lineNo = String(ln).padStart(nw);
-						return `${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${hlLine}`;
-					}).join("\n");
-					let hlBody = hlCode;
-					if (totalLines > shown.length) {
-						hlBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
-					}
-					textComp.setText(withBranch(`${loadInfo}\n${hlBody}`, theme));
-					safeInvalidate(ctx);
-				}).catch(() => {});
+			// Async Shiki syntax highlighting (one in-flight render per read slice).
+			if (!cachedHL) {
+				const lang = detectLang(filePath);
+				if (lang && (ctx.state as any)?._readHLPendingKey !== readHLKey) {
+					try { (ctx.state as any)._readHLPendingKey = readHLKey; } catch {}
+					codeToAnsiLazy(shown.join("\n"), lang, DIFF_THEME).then((ansi) => {
+						if ((ctx.state as any)?._readHLPendingKey !== readHLKey) return;
+						const hlLines = ansi.split("\n");
+						if (hlLines.length === 0) return;
+						const hlCode = hlLines.map((hlLine: string, i: number) => {
+							const ln = offset + i + 1;
+							const lineNo = String(ln).padStart(nw);
+							return `${NOWRAP_MARK}${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${hlLine || " "}`;
+						}).join("\n");
+						let hlBody = hlCode;
+						if (totalLines > shown.length) {
+							hlBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
+						}
+						try {
+							(ctx.state as any)._readHLKey = readHLKey;
+							(ctx.state as any)._readHL = hlBody;
+							delete (ctx.state as any)._readHLPendingKey;
+						} catch {}
+						textComp.setText(withBranch(`${loadInfo}\n${hlBody}`, theme));
+						safeInvalidate(ctx);
+					}).catch(() => {
+						try {
+							if ((ctx.state as any)?._readHLPendingKey === readHLKey) delete (ctx.state as any)._readHLPendingKey;
+						} catch {}
+					});
+				}
 			}
 
 			return textComp;
@@ -5810,7 +5991,7 @@ export default function (pi: ExtensionAPI) {
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
 			if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
-			text += `\n${buildPreviewText(nonEmpty.map((line) => theme.fg("dim", line)), false, theme, collapsed)}`;
+			text += `\n${buildPreviewText(nonEmpty.map((line) => theme.fg("dim", line)), true, theme, collapsed)}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});
@@ -5840,14 +6021,23 @@ export default function (pi: ExtensionAPI) {
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
 			const details = result.details as GrepToolDetails | undefined;
+			const rtkCompaction = getRtkCompaction(details);
 			const matches = (result.content[0]?.type === "text" ? result.content[0].text : "")
 				.split("\n")
 				.filter((line) => line.trim().length > 0);
-			if (matches.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no matches"), theme));
-			let text = theme.fg("muted", `${matches.length} matches`);
+			if (matches.length === 0) {
+				let text = theme.fg("muted", "no matches");
+				if (expanded && rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
+				return makeText(ctx.lastComponent, withBranch(text, theme));
+			}
+			const grouped = getGrepGroupedSummary(matches);
+			let text = theme.fg("muted", `${grouped.count} matches${grouped.files !== undefined ? ` in ${grouped.files} files` : ""}`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
-			text += `\n${buildPreviewText(matches.map((line) => theme.fg("dim", line)), false, theme, previewLimit())}`;
+			if (rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
+			const previewLines = grouped.header ? matches.filter((line) => line !== grouped.header) : matches;
+			const formattedPreview = rtkCompaction ? formatGroupedGrepPreview(previewLines, ctx.args, theme) : previewLines.map((line) => theme.fg("dim", line));
+			text += `\n${buildPreviewText(formattedPreview, false, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});
@@ -5965,6 +6155,7 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				old = null;
 			}
+			WRITE_OLD_CONTENT.set(toolCallId, old);
 			const result = await writeTool.execute(toolCallId, params, signal, onUpdate);
 			const content = params.content ?? "";
 			if (old !== null && old !== content) {
@@ -5979,6 +6170,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
+			const content = typeof args?.content === "string" ? args.content : undefined;
 			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "content"));
 			syncToolCallStatus(ctx);
 			const wasNew = getWriteWasNewFile(ctx, cwd, fp, revealSummary);
@@ -5988,7 +6180,72 @@ export default function (pi: ExtensionAPI) {
 				return shouldRevealCallArgs(ctx) ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
 			}, revealSummary);
 			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme));
-			return makeText(ctx.lastComponent, hdr);
+			if (!fp || content === undefined) return makeText(ctx.lastComponent, hdr);
+
+			let oldContent: string | null | undefined;
+			const toolCallId = typeof ctx?.toolCallId === "string" ? ctx.toolCallId : undefined;
+			if (toolCallId && WRITE_OLD_CONTENT.has(toolCallId)) oldContent = WRITE_OLD_CONTENT.get(toolCallId) ?? null;
+			if (oldContent === undefined) {
+				try {
+					oldContent = fileExistsForTool(cwd, fp) ? readFileSync(resolve(cwd, fp), "utf-8") : null;
+				} catch {
+					oldContent = null;
+				}
+			}
+			const oldHash = oldContent === null ? "new" : hashText(oldContent);
+			const contentHash = hashText(content);
+			const diffWidth = branchDiffWidth();
+			const key = `write:${fp}:${oldHash}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+			if (ctx.state) ctx.state._writePreviewActiveKey = key;
+			if (oldContent === content) {
+				const noChange = indentBranchBlock(withBranch(theme.fg("muted", "✓ no changes"), theme, false, true));
+				if (ctx.state) {
+					ctx.state._writePreviewKey = key;
+					ctx.state._writePreviewDisplay = noChange;
+					ctx.state._writePreviewDisplayKey = key;
+				}
+				return makeText(ctx.lastComponent, `${hdr}\n${noChange}`);
+			}
+
+			const diff = getCachedParsedDiff(ctx, `write-call-diff:${fp}:${oldHash}:${contentHash}`, oldContent ?? "", content);
+			const isNew = oldContent === null;
+			const hunks = countDiffHunks(diff);
+			const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
+			const mode = isNew ? "new file" : shouldUseSplit(diff, diffWidth, previewLines) ? "split" : "unified";
+			const richSummary = diffSummaryWithMeta(diff.added, diff.removed, hunks, mode);
+			if (ctx.state._writePreviewKey !== key) {
+				ctx.state._writePreviewKey = key;
+				if (!ctx.state._writePreviewDisplay) {
+					ctx.state._writePreviewDisplay = indentBranchBlock(withBranch(theme.fg("muted", "rendering diff…"), theme, false, true));
+				}
+			}
+			if (ctx.state._writePreviewDisplayKey !== key && ctx.state._writePreviewPendingKey !== key) {
+				ctx.state._writePreviewPendingKey = key;
+				const dc = resolveDiffColors(theme);
+				const renderPromise = isNew
+					? renderUnified(diff, lang(fp), previewLines, dc, diffWidth)
+					: renderSplit(diff, lang(fp), previewLines, dc, diffWidth);
+				renderPromise
+					.then((rendered) => {
+						if (ctx.state._writePreviewKey !== key) return;
+						const body = rendered;
+						ctx.state._writePreviewBody = body;
+						ctx.state._writePreviewDisplay = indentBranchBlock(withBranch(body, theme, false, true));
+						ctx.state._writePreviewDisplayKey = key;
+						delete ctx.state._writePreviewPendingKey;
+						safeInvalidate(ctx);
+					})
+					.catch(() => {
+						if (ctx.state._writePreviewKey !== key) return;
+						ctx.state._writePreviewBody = richSummary;
+						ctx.state._writePreviewDisplay = indentBranchBlock(withBranch(richSummary, theme, false, true));
+						ctx.state._writePreviewDisplayKey = key;
+						delete ctx.state._writePreviewPendingKey;
+						safeInvalidate(ctx);
+					});
+			}
+			const body = ctx.state._writePreviewDisplay as string | undefined;
+			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6012,6 +6269,7 @@ export default function (pi: ExtensionAPI) {
 				const diffWidth = branchDiffWidth();
 				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
+				if (ctx.state?._writePreviewDisplay) return makeText(ctx.lastComponent, withBranch(richSummary, theme));
 				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._wdk !== key) {
 					ctx.state._wdk = key;
@@ -6038,6 +6296,7 @@ export default function (pi: ExtensionAPI) {
 				const contentHash = hashText(content);
 				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
+				if (ctx.state?._writePreviewDisplay) return makeText(ctx.lastComponent, withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const diffWidth = branchDiffWidth();
 				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
@@ -6111,14 +6370,23 @@ export default function (pi: ExtensionAPI) {
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
-			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
+			// Historical session replay may not call setArgsComplete() before rendering.
+			// If edit operations are present, args are complete enough to render preview.
+			if (operations.length === 0) return makeText(ctx.lastComponent, hdr);
 			const diffWidth = branchDiffWidth();
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
-				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
+				// Keep existing diff visible while new async preview renders. Only show
+				// placeholder on first render; do not blank output on every invalidate.
+				if (!ctx.state._ptDisplay) {
+					ctx.state._ptBody = theme.fg("muted", "(rendering…)");
+					ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
+				}
+			}
+			if (ctx.state._ptDisplayKey !== key && ctx.state._ptPendingKey !== key) {
+				ctx.state._ptPendingKey = key;
 				const lg = lang(fp);
 				void computeLocalizedEditDiffs(fp, operations, cwd)
 					.then((localizedDiffs) => {
@@ -6132,7 +6400,7 @@ export default function (pi: ExtensionAPI) {
 						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
 					});
 			}
-				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
+			const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
