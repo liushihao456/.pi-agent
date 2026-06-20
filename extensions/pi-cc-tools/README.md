@@ -5,22 +5,25 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 ## Features
 
 - **Compact built-in tool rendering** for `read`, `bash`, `grep`, `find`, `ls`, `edit`, and `write`
+- **Read previews with line-number gutters** (`line │ code`), async Shiki highlighting, offset-aware numbering, and single-line truncation for long lines
 - **Claude-style OpenAI tool rendering** for `apply_patch` plus common Pi/OpenAI-style tools like `webfetch`, `web_search`, `fetch_content`, task tools, and context tools
 - **`apply_patch` diff previews** that render parsed file patches in the call phase, similar to `edit`/`write`
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
+- **Call-phase `edit` and `write` diff previews** that render asynchronously as soon as tool arguments are available; final results keep the concise success summary
 - **Diff stat bar** with colored add/remove summary and hunk metadata
 - **Progressive collapsed diff hints** that shorten on narrow terminals
 - **Thinking labels** during streaming and final messages, with context sanitization
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
+- **Tail-first bash output** for both running and expanded completed bash results, so the most recent lines stay visible
 - **Subagent completion notifications** restyled to match the same Claude-style tool rows
-- **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
+- **RTK integration** for bash rewrites and grep compaction: bash rewrite notices fold into the bash row with a muted `(RTK)` badge, while RTK-compacted grep results show compacted line/character counts and read-style match gutters
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
 - **Light Ghostty-sync themes** — edit/write diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
 - **Transparent edit/write diffs** with universal red/green diff colors
-- **Grouped consecutive tool calls** with a compact status header and per-tool glance rows (set `groupToolCalls: false` to disable)
+- **Grouped consecutive tool calls** with a compact status header and per-tool glance rows, preserving nested read/grep gutters and indentation (set `groupToolCalls: false` to disable)
 - **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
 - **Global border patch** for all tool rows, including unknown/custom tools
 
@@ -121,6 +124,14 @@ Use `/cc-tools` to control tool UI at runtime:
 | `searchOutputMode` | `hidden`, `count`, `preview` | `preview` |
 | `mcpOutputMode` | `hidden`, `summary`, `preview` | `preview` |
 | `bashOutputMode` | `opencode`, `summary`, `preview` | `opencode` |
+
+### Output details
+
+- `read` preview rows use `line │ code`, preserve requested offsets, and update from plain text to Shiki-highlighted output asynchronously without blocking the UI.
+- Long `read` lines are truncated in-place with `…` instead of wrapping.
+- `edit`, `write`, and `apply_patch` render diff previews from the call arguments when available; `edit`/`write` final rows show only the concise completion summary to avoid duplicate diff stats.
+- Completed expanded `bash` output shows the tail of the command output, matching the running preview behavior.
+- RTK-compacted `grep` output is detected from `result.details.rtkCompaction` metadata. Expanded rows show `RTK compacted · lines: old → new · chars: old → new`, drop the duplicated grouped header, and render per-file matches as right-aligned `line │ code` rows with highlighted matches.
 
 ### Display settings
 
