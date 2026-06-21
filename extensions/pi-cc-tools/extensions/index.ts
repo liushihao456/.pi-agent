@@ -913,7 +913,7 @@ function deepExpandHint(): string {
 }
 
 function toolOutputDetailHint(theme: Theme, expanded: boolean, hasMore = false): string {
-	if (!expanded) return expandHint(theme, "toggle");
+	if (!expanded) return expandHint(theme, "expand");
 	const parts = [expandHint(theme, "collapse")];
 	if (hasMore || extraToolOutputExpanded) parts.push(deepExpandHint());
 	return parts.join("");
