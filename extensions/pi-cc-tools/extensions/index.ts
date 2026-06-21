@@ -81,7 +81,6 @@ interface SettingsFile {
 	previewLines?: number;
 	expandedPreviewMaxLines?: number;
 	extraExpandedPreviewMaxLines?: number;
-	extraToolOutputExpanded?: boolean;
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
@@ -886,17 +885,6 @@ function hashText(text: string): string {
 	return (hash >>> 0).toString(36);
 }
 
-let extraToolOutputExpanded = false;
-
-function syncExtraToolDetailMode(): void {
-	extraToolOutputExpanded = readSettings().extraToolOutputExpanded === true;
-}
-
-function setExtraToolDetailMode(enabled: boolean): void {
-	extraToolOutputExpanded = enabled;
-	writeSettingsKey("extraToolOutputExpanded", enabled);
-}
-
 function configuredKeyHint(binding: Parameters<typeof keyText>[0], fallbackKey: string, description: string): string {
 	try {
 		if (keyText(binding).trim()) return keyHint(binding, description);
@@ -908,14 +896,9 @@ function expandHint(_theme: Theme, action: "expand" | "collapse" | "toggle" = "t
 	return ` • ${configuredKeyHint("app.tools.expand", "ctrl+o", `to ${action}`)}`;
 }
 
-function deepExpandHint(): string {
-	return ` • ${rawKeyHint("ctrl+shift+o", extraToolOutputExpanded ? "less detail" : "more detail")}`;
-}
-
 function toolOutputDetailHint(theme: Theme, expanded: boolean, hasMore = false): string {
 	if (!expanded) return expandHint(theme, "expand");
 	const parts = [expandHint(theme, "collapse")];
-	if (hasMore || extraToolOutputExpanded) parts.push(deepExpandHint());
 	return parts.join("");
 }
 
@@ -2675,9 +2658,8 @@ function previewLimit(): number {
 
 function expandedPreviewLimit(): number {
 	const settings = readSettings();
-	const key = extraToolOutputExpanded ? "extraExpandedPreviewMaxLines" : "expandedPreviewMaxLines";
-	const value = settings[key];
-	const fallback = extraToolOutputExpanded ? 12000 : 4000;
+	const value = settings["expandedPreviewMaxLines"];
+	const fallback = 4000;
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
@@ -2714,7 +2696,7 @@ function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fall
 		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
 	if (expanded && lines.length > maxLines) {
-		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines${deepExpandHint()})`)}`;
+		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines)`)}`;
 	}
 	return text;
 }
@@ -5441,23 +5423,11 @@ export default function (pi: ExtensionAPI) {
 	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
-	syncExtraToolDetailMode();
-
-	pi.registerShortcut("ctrl+shift+o", {
-		description: "Toggle extra tool output detail",
-		handler: async (ctx) => {
-			setExtraToolDetailMode(!extraToolOutputExpanded);
-			if (ctx.hasUI) {
-				ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-				ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
-			}
-		},
-	});
 
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "branch", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -5480,13 +5450,12 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify([
 			`Tool style: ${toolBackgroundMode}`,
 			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
-			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 			branchLine,
 			`  /cc-tools branch <0-255> | theme | fixed | reset`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
-		description: "Control tool UI: style, grouped rows, and Ctrl+Shift+O extra-detail mode",
+		description: "Control tool UI: style and grouped rows",
 		getArgumentCompletions(prefix) {
 			const parts = prefix.trimStart().split(/\s+/);
 			const first = parts[0] ?? "";
@@ -5498,7 +5467,6 @@ export default function (pi: ExtensionAPI) {
 						label: m,
 						description:
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
-							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├─ └─ │ gray (0-255), theme, fixed, or reset"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
@@ -5582,24 +5550,6 @@ export default function (pi: ExtensionAPI) {
 				writeSettingsKey("toolBranchColorMode", "fixed");
 				if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
 				if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${gray})`, "info");
-				return;
-			}
-
-			if (sub === "detail" || sub === "extra") {
-				const next = booleanMode(parts[1], extraToolOutputExpanded);
-				if (next === undefined) {
-					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools detail ${TOOL_BOOL_MODES.join("|")}`, "error");
-					return;
-				}
-				if (next === "status") {
-					if (ctx.hasUI) ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
-					return;
-				}
-				setExtraToolDetailMode(next);
-				if (ctx.hasUI) {
-					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-					ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
-				}
 				return;
 			}
 
@@ -5900,7 +5850,7 @@ export default function (pi: ExtensionAPI) {
 				});
 				codeBody = codeLines.join("\n");
 				if (totalLines > shown.length) {
-					codeBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
+					codeBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines`)}${toolOutputDetailHint(theme, expanded)}`;
 				}
 			}
 
@@ -5923,7 +5873,7 @@ export default function (pi: ExtensionAPI) {
 						}).join("\n");
 						let hlBody = hlCode;
 						if (totalLines > shown.length) {
-							hlBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines (${totalLines} total)`)}`;
+							hlBody += `\n${theme.fg("muted", `… ${totalLines - shown.length} more lines`)}${toolOutputDetailHint(theme, expanded)}`;
 						}
 						try {
 							(ctx.state as any)._readHLKey = readHLKey;
@@ -6037,7 +5987,7 @@ export default function (pi: ExtensionAPI) {
 			if (rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
 			const previewLines = grouped.header ? matches.filter((line) => line !== grouped.header) : matches;
 			const formattedPreview = rtkCompaction ? formatGroupedGrepPreview(previewLines, ctx.args, theme) : previewLines.map((line) => theme.fg("dim", line));
-			text += `\n${buildPreviewText(formattedPreview, false, theme, previewLimit())}`;
+			text += `\n${buildPreviewText(formattedPreview, expanded, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});
