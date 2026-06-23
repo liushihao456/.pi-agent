@@ -1,6 +1,29 @@
 import { SPINNER_FRAMES } from "../constants.ts";
 import type { ComponentRenderInput } from "./type.ts";
 
+function renderGlowText(
+	theme: ComponentRenderInput["theme"],
+	text: string,
+	phase: number,
+): string {
+	const chars = Array.from(text);
+	if (chars.length === 0) return "";
+
+	const padding = 6;
+	const center = (phase % (chars.length + padding * 2)) - padding;
+
+	return chars
+		.map((char, index) => {
+			const distance = Math.abs(index - center);
+
+			if (distance < 0.5) return theme.bold(theme.fg("accent", char));
+			if (distance < 1.5) return theme.fg("accent", char);
+			if (distance < 2.5) return theme.fg("muted", char);
+			return theme.fg("dim", char);
+		})
+		.join("");
+}
+
 export function renderStatusComponent({
 	state,
 	theme,
@@ -11,6 +34,8 @@ export function renderStatusComponent({
 	const icon =
 		frames.length > 0 ? frames[state.spinnerIndex % frames.length] : "";
 	const label = state.workingMessage ?? "Working...";
-	const text = icon ? `${icon}\u202F${label}` : label;
-	return theme.fg("accent", text);
+	const glowingLabel = renderGlowText(theme, label, state.glowIndex);
+	return icon
+		? `${theme.fg("accent", icon)}\u202F${glowingLabel}`
+		: glowingLabel;
 }

@@ -24,6 +24,7 @@ export function createRuntimeState(): RuntimeState {
 		codexUsageLabel: "",
 		runtime: undefined,
 		spinnerIndex: 0,
+		glowIndex: 0,
 	};
 }
 
@@ -31,6 +32,7 @@ export function createRuntimeHandles(): RuntimeHandles {
 	return {
 		projectTimer: undefined,
 		spinnerInterval: undefined,
+		glowInterval: undefined,
 	};
 }
 

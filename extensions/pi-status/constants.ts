@@ -7,6 +7,7 @@ import type {
 
 export const PROJECT_REFRESH_INTERVAL_MS = 30_000;
 export const SPINNER_INTERVAL_MS = 80;
+export const GLOW_INTERVAL_MS = 80;
 
 export const ZONE_IDS: readonly Zone[] = [
 	"top-left",

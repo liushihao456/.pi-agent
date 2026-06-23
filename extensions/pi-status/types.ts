@@ -42,6 +42,7 @@ export type UsageCostTotals = {
 export type RuntimeHandles = {
 	projectTimer: ReturnType<typeof setInterval> | undefined;
 	spinnerInterval: ReturnType<typeof setInterval> | undefined;
+	glowInterval: ReturnType<typeof setInterval> | undefined;
 };
 
 export type RuntimeInfo = {
@@ -82,4 +83,5 @@ export type RuntimeState = GitStatusSummary & {
 	codexUsageLabel: string;
 	runtime?: RuntimeInfo;
 	spinnerIndex: number;
+	glowIndex: number;
 };

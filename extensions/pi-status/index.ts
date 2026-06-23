@@ -30,6 +30,7 @@ import {
 	readPiStatusConfig,
 } from "./config.ts";
 import {
+	GLOW_INTERVAL_MS,
 	PROJECT_REFRESH_INTERVAL_MS,
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
@@ -192,8 +193,30 @@ export default function piStatus(pi: ExtensionAPI) {
 		state.spinnerIndex = 0;
 	}
 
+	function clearGlow(): void {
+		if (handles.glowInterval) {
+			clearInterval(handles.glowInterval);
+			handles.glowInterval = undefined;
+		}
+		state.glowIndex = 0;
+	}
+
+	function syncGlowAnimation(): void {
+		clearGlow();
+		if (state.activity === "idle" || !isComponentEnabled(config, "status")) return;
+		handles.glowInterval = setInterval(() => {
+			if (state.destroyed || state.activity === "idle") {
+				clearGlow();
+				return;
+			}
+			state.glowIndex = (state.glowIndex + 1) % 1000;
+			requestRender();
+		}, GLOW_INTERVAL_MS);
+	}
+
 	function syncAnimation(): void {
 		clearSpinner();
+		syncGlowAnimation();
 		const frames =
 			state.activity === "idle"
 				? SPINNER_FRAMES.idle
@@ -311,6 +334,7 @@ export default function piStatus(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		state.destroyed = true;
 		clearSpinner();
+		clearGlow();
 		if (handles.projectTimer) clearInterval(handles.projectTimer);
 		if (usageTimer) clearInterval(usageTimer);
 		handles.projectTimer = undefined;
