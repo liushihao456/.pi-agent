@@ -682,7 +682,6 @@ class ToolGroupComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		for (const tool of this.tools) tool.setExpanded?.(expanded);
-		this.invalidate();
 	}
 
 	invalidate(): void {
@@ -2919,6 +2918,9 @@ const DEFAULT_TERM_WIDTH = 200;
 const MAX_PREVIEW_LINES = 60;
 const MAX_RENDER_LINES = 150;
 const MAX_HL_CHARS = 32_000;
+const STREAM_EDIT_DIFF_MAX_LINES = 300;
+const STREAM_EDIT_DIFF_MAX_CHARS = 30_000;
+const STREAM_EDIT_DIFF_STABLE_MS = 750;
 const CACHE_LIMIT = 48;
 const WORD_DIFF_MIN_SIM = 0.15;
 const MAX_WRAP_ROWS_WIDE = 3;
@@ -4022,7 +4024,7 @@ async function renderSplit(
 	type Row = { left: DiffLine | null; right: DiffLine | null };
 	const rows: Row[] = [];
 	let i = 0;
-	while (i < diff.lines.length) {
+	while (i < diff.lines.length && rows.length < max) {
 		const line = diff.lines[i];
 		if (line.type === "sep" || line.type === "ctx") {
 			rows.push({ left: line, right: line });
@@ -4038,8 +4040,10 @@ async function renderSplit(
 	}
 
 	const vis = rows.slice(0, max);
+	const hiddenRows = Math.max(0, rows.length - vis.length) + (i < diff.lines.length ? Math.max(1, diff.lines.length - i) : 0);
 	const half = Math.floor((tw - 1) / 2);
-	const nw = Math.max(2, String(Math.max(...diff.lines.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
+	const maxVisibleLineNo = Math.max(...vis.flatMap((row) => [row.left?.oldNum ?? row.left?.newNum ?? 0, row.right?.oldNum ?? row.right?.newNum ?? 0]), 0);
+	const nw = Math.max(2, String(maxVisibleLineNo).length);
 	const gw = nw + 5;
 	const cw = Math.max(12, half - gw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length * 2 <= MAX_RENDER_LINES * 2;
@@ -4141,7 +4145,7 @@ async function renderSplit(
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
-	if (rows.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(rows.length - vis.length, 0)}${D_RST}`);
+	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -4225,6 +4229,89 @@ function lineNumberAtIndex(text: string, index: number): number {
 
 function countLineBreaks(text: string): number {
 	return (text.match(/\n/g) ?? []).length;
+}
+
+function textDiffSize(oldText: string, newText: string): { lines: number; chars: number } {
+	return {
+		lines: Math.max(countLineBreaks(oldText) + 1, countLineBreaks(newText) + 1),
+		chars: oldText.length + newText.length,
+	};
+}
+
+function editOperationSize(operations: Array<{ oldText: string; newText: string }>): { lines: number; chars: number } {
+	let lines = 0;
+	let chars = 0;
+	for (const edit of operations) {
+		const size = textDiffSize(edit.oldText, edit.newText);
+		lines += size.lines;
+		chars += size.chars;
+	}
+	return { lines, chars };
+}
+
+function isLargeStreamingDiffSize(size: { lines: number; chars: number }): boolean {
+	return size.lines > STREAM_EDIT_DIFF_MAX_LINES || size.chars > STREAM_EDIT_DIFF_MAX_CHARS;
+}
+
+function shouldDeferLargeEditDiff(ctx: any, parseKey: string, operations: Array<{ oldText: string; newText: string }>): boolean {
+	const size = editOperationSize(operations);
+	if (!isLargeStreamingDiffSize(size)) return false;
+	if (ctx?.argsComplete === true || ctx?.executionStarted === true) return false;
+	return !(ctx?.state?._editStableParseKey === parseKey && ctx.state._editStableReady === true);
+}
+
+function shouldDeferLargeWriteDiff(ctx: any, parseKey: string, oldText: string, newText: string): boolean {
+	if (!isLargeStreamingDiffSize(textDiffSize(oldText, newText))) return false;
+	if (ctx?.argsComplete === true || ctx?.executionStarted === true) return false;
+	return !(ctx?.state?._writeStableParseKey === parseKey && ctx.state._writeStableReady === true);
+}
+
+function scheduleLargeEditStableDiff(ctx: any, parseKey: string): void {
+	const state = ctx?.state;
+	if (!state) return;
+	if (state._editStableParseKey === parseKey && state._editStableTimer) return;
+	if (state._editStableTimer) clearTimeout(state._editStableTimer);
+	state._editStableParseKey = parseKey;
+	state._editStableReady = false;
+	const timer = setTimeout(() => {
+		if (state._editStableParseKey !== parseKey) return;
+		state._editStableReady = true;
+		delete state._editStableTimer;
+		safeInvalidate(ctx);
+	}, STREAM_EDIT_DIFF_STABLE_MS);
+	state._editStableTimer = timer;
+	unrefTimer(timer);
+}
+
+function clearLargeEditStableDiff(state: any, parseKey: string): void {
+	if (!state || state._editStableParseKey !== parseKey) return;
+	if (state._editStableTimer) clearTimeout(state._editStableTimer);
+	delete state._editStableTimer;
+	delete state._editStableReady;
+}
+
+function scheduleLargeWriteStableDiff(ctx: any, parseKey: string): void {
+	const state = ctx?.state;
+	if (!state) return;
+	if (state._writeStableParseKey === parseKey && state._writeStableTimer) return;
+	if (state._writeStableTimer) clearTimeout(state._writeStableTimer);
+	state._writeStableParseKey = parseKey;
+	state._writeStableReady = false;
+	const timer = setTimeout(() => {
+		if (state._writeStableParseKey !== parseKey) return;
+		state._writeStableReady = true;
+		delete state._writeStableTimer;
+		safeInvalidate(ctx);
+	}, STREAM_EDIT_DIFF_STABLE_MS);
+	state._writeStableTimer = timer;
+	unrefTimer(timer);
+}
+
+function clearLargeWriteStableDiff(state: any, parseKey: string): void {
+	if (!state || state._writeStableParseKey !== parseKey) return;
+	if (state._writeStableTimer) clearTimeout(state._writeStableTimer);
+	delete state._writeStableTimer;
+	delete state._writeStableReady;
 }
 
 function offsetParsedDiff(diff: ParsedDiff, oldOffset: number, newOffset = oldOffset): ParsedDiff {
@@ -6142,12 +6229,14 @@ export default function (pi: ExtensionAPI) {
 					oldContent = null;
 				}
 			}
-			const oldHash = oldContent === null ? "new" : hashText(oldContent);
+			const previousContent = oldContent ?? null;
+			const oldHash = previousContent === null ? "new" : hashText(previousContent);
 			const contentHash = hashText(content);
 			const diffWidth = branchDiffWidth();
-			const key = `write:${fp}:${oldHash}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+			const parseKey = `write:${fp}:${oldHash}:${contentHash}`;
+			const key = `${parseKey}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			if (ctx.state) ctx.state._writePreviewActiveKey = key;
-			if (oldContent === content) {
+			if (previousContent === content) {
 				const noChange = indentBranchBlock(withBranch(theme.fg("muted", "✓ no changes"), theme, false, true));
 				if (ctx.state) {
 					ctx.state._writePreviewKey = key;
@@ -6157,8 +6246,16 @@ export default function (pi: ExtensionAPI) {
 				return makeText(ctx.lastComponent, `${hdr}\n${noChange}`);
 			}
 
-			const diff = getCachedParsedDiff(ctx, `write-call-diff:${fp}:${oldHash}:${contentHash}`, oldContent ?? "", content);
-			const isNew = oldContent === null;
+			if (shouldDeferLargeWriteDiff(ctx, parseKey, previousContent ?? "", content)) {
+				if (ctx.state) ctx.state._writePreviewKey = key;
+				scheduleLargeWriteStableDiff(ctx, parseKey);
+				const body = ctx.state?._writePreviewDisplay as string | undefined;
+				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			}
+			if (ctx?.argsComplete === true || ctx?.executionStarted === true) clearLargeWriteStableDiff(ctx.state, parseKey);
+
+			const diff = getCachedParsedDiff(ctx, `write-call-diff:${parseKey}`, previousContent ?? "", content);
+			const isNew = previousContent === null;
 			const hunks = countDiffHunks(diff);
 			const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 			const mode = isNew ? "new file" : shouldUseSplit(diff, diffWidth, previewLines) ? "split" : "unified";
@@ -6324,10 +6421,19 @@ export default function (pi: ExtensionAPI) {
 			// If edit operations are present, args are complete enough to render preview.
 			if (operations.length === 0) return makeText(ctx.lastComponent, hdr);
 			const diffWidth = branchDiffWidth();
-			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
-			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
-			if (ctx.state._pk !== key) {
-				ctx.state._pk = key;
+			const editHash = hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"));
+			const parseKey = `edit:${fp}:${editHash}`;
+			const renderKey = `${parseKey}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+			if (shouldDeferLargeEditDiff(ctx, parseKey, operations)) {
+				if (ctx.state) ctx.state._pk = renderKey;
+				scheduleLargeEditStableDiff(ctx, parseKey);
+				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state?._ptDisplay as string | undefined);
+				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			}
+			if (ctx?.argsComplete === true || ctx?.executionStarted === true) clearLargeEditStableDiff(ctx.state, parseKey);
+			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, parseKey, operations);
+			if (ctx.state._pk !== renderKey) {
+				ctx.state._pk = renderKey;
 				// Keep existing diff visible while new async preview renders. Only show
 				// placeholder on first render; do not blank output on every invalidate.
 				if (!ctx.state._ptDisplay) {
@@ -6335,20 +6441,36 @@ export default function (pi: ExtensionAPI) {
 					ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 				}
 			}
-			if (ctx.state._ptDisplayKey !== key && ctx.state._ptPendingKey !== key) {
-				ctx.state._ptPendingKey = key;
+			if (ctx.state._ptDisplayKey !== renderKey && ctx.state._ptPendingKey !== renderKey) {
+				ctx.state._ptPendingKey = renderKey;
 				const lg = lang(fp);
-				void computeLocalizedEditDiffs(fp, operations, cwd)
-					.then((localizedDiffs) => {
-						if (ctx.state._pk !== key) return;
-						const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
-						const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
-						renderEditPreviewBody(ctx, key, theme, lg, operations, diffs, lines, editSummary);
-					})
-					.catch(() => {
-						if (ctx.state._pk !== key) return;
-						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
-					});
+				const renderLocalizedPreview = (localizedDiffs: LocalizedEditDiff[] | null | undefined): void => {
+					const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
+					const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
+					renderEditPreviewBody(ctx, renderKey, theme, lg, operations, diffs, lines, editSummary);
+				};
+				const hasLocalizedCache = ctx.state?._editLocalizedKey === parseKey && Object.prototype.hasOwnProperty.call(ctx.state, "_editLocalizedDiffs");
+				if (hasLocalizedCache) {
+					renderLocalizedPreview(ctx.state._editLocalizedDiffs as LocalizedEditDiff[] | null);
+				} else {
+					void computeLocalizedEditDiffs(fp, operations, cwd)
+						.then((localizedDiffs) => {
+							if (ctx.state._pk !== renderKey) return;
+							try {
+								ctx.state._editLocalizedKey = parseKey;
+								ctx.state._editLocalizedDiffs = localizedDiffs ?? null;
+							} catch {}
+							renderLocalizedPreview(localizedDiffs);
+						})
+						.catch(() => {
+							if (ctx.state._pk !== renderKey) return;
+							try {
+								ctx.state._editLocalizedKey = parseKey;
+								ctx.state._editLocalizedDiffs = null;
+							} catch {}
+							renderLocalizedPreview(null);
+						});
+				}
 			}
 			const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
