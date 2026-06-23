@@ -83,5 +83,6 @@ export type RuntimeState = GitStatusSummary & {
 	codexUsageLabel: string;
 	runtime?: RuntimeInfo;
 	spinnerIndex: number;
-	glowIndex: number;
+	glowPosition: number;
+	lastGlowAt: number | undefined;
 };

@@ -7,7 +7,10 @@ import type {
 
 export const PROJECT_REFRESH_INTERVAL_MS = 30_000;
 export const SPINNER_INTERVAL_MS = 80;
-export const GLOW_INTERVAL_MS = 80;
+export const GLOW_INTERVAL_MS = 1000 / 30;
+export const SHIMMER_SPEED_CELLS_PER_S = 20;
+export const SHIMMER_CLASSIC_PADDING = 15;
+export const SHIMMER_CLASSIC_BAND_HALF_WIDTH = 6;
 
 export const ZONE_IDS: readonly Zone[] = [
 	"top-left",

@@ -32,6 +32,8 @@ import {
 import {
 	GLOW_INTERVAL_MS,
 	PROJECT_REFRESH_INTERVAL_MS,
+	SHIMMER_CLASSIC_PADDING,
+	SHIMMER_SPEED_CELLS_PER_S,
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
 } from "./constants.ts";
@@ -46,6 +48,7 @@ import type { PiStatusConfig } from "./types.ts";
 const WORKING_UI_PATCHED = Symbol.for("pi-status:interactive-mode-working-ui-patched");
 const WORKING_UI_CONTEXT_PATCHED = Symbol.for("pi-status:context-working-ui-patched");
 const WORKING_UI_HANDLER = Symbol.for("pi-status:working-ui-handler");
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 type WorkingUiHandler = {
 	setWorkingMessage?: (message?: string) => void;
@@ -226,18 +229,31 @@ export default function piStatus(pi: ExtensionAPI) {
 			clearInterval(handles.glowInterval);
 			handles.glowInterval = undefined;
 		}
-		state.glowIndex = 0;
+		state.glowPosition = 0;
+		state.lastGlowAt = undefined;
 	}
 
 	function syncGlowAnimation(): void {
 		clearGlow();
 		if (state.activity === "idle" || !isComponentEnabled(config, "status")) return;
+		state.lastGlowAt = Date.now();
 		handles.glowInterval = setInterval(() => {
 			if (state.destroyed || state.activity === "idle") {
 				clearGlow();
 				return;
 			}
-			state.glowIndex = (state.glowIndex + 1) % 1000;
+			const now = Date.now();
+			const lastGlowAt = state.lastGlowAt ?? now;
+			state.lastGlowAt = now;
+			state.glowPosition +=
+				((now - lastGlowAt) / 1000) * SHIMMER_SPEED_CELLS_PER_S;
+
+			const label = (state.workingMessage ?? "Working...").replace(ANSI_RE, "");
+			const period = Array.from(label).length + SHIMMER_CLASSIC_PADDING * 2;
+			if (period > 0 && state.glowPosition >= period) {
+				state.glowPosition %= period;
+			}
+
 			requestRender();
 		}, GLOW_INTERVAL_MS);
 	}

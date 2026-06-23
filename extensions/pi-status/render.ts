@@ -29,7 +29,7 @@ function terminalColorToAnsi(color: string, isBackground = false): string | unde
   return code === undefined ? undefined : `${isBackground ? code + 10 : code}`;
 }
 
-function renderStyle(theme: Pick<Theme, "fg" | "bold">, style: string, text: string): string {
+function renderStyle(theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">, style: string, text: string): string {
   const ansiCodes: string[] = [];
   let themeColor: string | undefined;
   let themedText = text;
@@ -76,7 +76,7 @@ export function collectZoneSegments(
   config: PiStatusConfig,
   state: RuntimeState,
   ctx: ExtensionContext,
-  theme: Pick<Theme, "fg" | "bold">,
+  theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">,
   zone: Zone,
 ): string[] {
   const segments: string[] = [];
@@ -97,7 +97,7 @@ export function collectZoneSegments(
 /** Join segments for a zone with the styled separator. */
 export function joinZoneSegments(
   config: PiStatusConfig,
-  theme: Pick<Theme, "fg" | "bold">,
+  theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">,
   segments: string[],
 ): string {
   if (segments.length === 0) return "";
@@ -110,7 +110,7 @@ export function renderZoneContent(
   config: PiStatusConfig,
   state: RuntimeState,
   ctx: ExtensionContext,
-  theme: Pick<Theme, "fg" | "bold">,
+  theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">,
   zone: Zone,
 ): string {
   const segments = collectZoneSegments(config, state, ctx, theme, zone);
@@ -127,7 +127,7 @@ export function renderFlatLine(
   config: PiStatusConfig,
   state: RuntimeState,
   ctx: ExtensionContext,
-  theme: Pick<Theme, "fg" | "bold">,
+  theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">,
   width: number,
 ): string {
   const separator = renderStyle(theme, STATUS_STYLES.separator, config.separator);

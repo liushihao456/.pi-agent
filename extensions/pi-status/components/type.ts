@@ -4,7 +4,7 @@ import type { RuntimeState } from "../types.ts";
 export type ComponentRenderInput = {
   state: RuntimeState;
   ctx: ExtensionContext;
-  theme: Pick<Theme, "fg" | "bold">;
+  theme: Pick<Theme, "fg" | "bold" | "getFgAnsi">;
 };
 
 export type ComponentRenderer = (input: ComponentRenderInput) => string;

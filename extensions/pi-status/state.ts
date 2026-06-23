@@ -24,7 +24,8 @@ export function createRuntimeState(): RuntimeState {
 		codexUsageLabel: "",
 		runtime: undefined,
 		spinnerIndex: 0,
-		glowIndex: 0,
+		glowPosition: 0,
+		lastGlowAt: undefined,
 	};
 }
 
