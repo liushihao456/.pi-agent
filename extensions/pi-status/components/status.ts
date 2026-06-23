@@ -1,12 +1,14 @@
 import { SPINNER_FRAMES } from "../constants.ts";
 import type { ComponentRenderInput } from "./type.ts";
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
 function renderGlowText(
 	theme: ComponentRenderInput["theme"],
 	text: string,
 	phase: number,
 ): string {
-	const chars = Array.from(text);
+	const chars = Array.from(text.replace(ANSI_RE, ""));
 	if (chars.length === 0) return "";
 
 	const padding = 6;
