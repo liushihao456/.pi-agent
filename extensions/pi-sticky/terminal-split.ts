@@ -730,8 +730,23 @@ export class TerminalSplitCompositor {
 
 		const mousePackets = this.mouseScroll ? parseSgrMousePackets(data) : null;
 		if (mousePackets) {
+			let pendingScrollDelta = 0;
 			for (const packet of mousePackets) {
+				const delta = mouseScrollDelta(packet);
+				if (delta !== 0) {
+					this.selectionDragging = false;
+					pendingScrollDelta += delta;
+					continue;
+				}
+
+				if (pendingScrollDelta !== 0) {
+					this.scrollBy(pendingScrollDelta);
+					pendingScrollDelta = 0;
+				}
 				this.handleMousePacket(packet);
+			}
+			if (pendingScrollDelta !== 0) {
+				this.scrollBy(pendingScrollDelta);
 			}
 			return { consume: true };
 		}
