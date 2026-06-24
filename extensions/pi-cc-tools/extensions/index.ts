@@ -657,6 +657,15 @@ function formatBranchedToolLines(lines: string[], index: number, total: number, 
 const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch"]);
 const ACTIVE_TOOL_GROUPS = new Set<any>();
 
+type ToolGroupRenderCache = {
+	width: number;
+	expanded: boolean;
+	branchKey: string;
+	branchEpoch: number;
+	statusKey: string;
+	lines: string[];
+};
+
 function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecutionComponent> {
 	return value instanceof ToolExecutionComponent && !NON_GROUPABLE_TOOL_NAMES.has(getToolName(value));
 }
@@ -664,9 +673,15 @@ function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecu
 class ToolGroupComponent extends Container {
 	private tools: any[] = [];
 	private expanded = false;
+	private renderCache: ToolGroupRenderCache | undefined;
+
+	clearRenderCache(): void {
+		this.renderCache = undefined;
+	}
 
 	addTool(tool: any): void {
 		ACTIVE_TOOL_GROUPS.add(this);
+		this.clearRenderCache();
 		this.tools.push(tool);
 		tool[COMPONENT_PARENT] = this;
 		this.invalidate();
@@ -675,22 +690,43 @@ class ToolGroupComponent extends Container {
 	releaseTools(): any[] {
 		const tools = this.tools;
 		this.tools = [];
+		this.clearRenderCache();
 		ACTIVE_TOOL_GROUPS.delete(this);
 		return tools;
 	}
 
 	setExpanded(expanded: boolean): void {
+		if (this.expanded !== expanded) this.clearRenderCache();
 		this.expanded = expanded;
 		for (const tool of this.tools) tool.setExpanded?.(expanded);
 	}
 
 	invalidate(): void {
+		this.clearRenderCache();
 		for (const tool of this.tools) tool.invalidate?.();
+	}
+
+	private statusKey(): string {
+		return this.tools.map((tool) => `${getToolName(tool)}:${tool?.toolCallId ?? ""}:${getToolStatusForGroup(tool)}`).join("|");
 	}
 
 	render(width: number): string[] {
 		if (this.tools.length === 0) return [];
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
+		const branchKey = toolBranchRenderCacheKey();
+		const statusKey = this.statusKey();
+		const hasPendingTool = statusKey.includes(":pending");
+		const cached = this.renderCache;
+		if (!hasPendingTool
+			&& cached?.width === safeWidth
+			&& cached?.expanded === this.expanded
+			&& cached?.branchKey === branchKey
+			&& cached?.branchEpoch === _toolBranchVisualEpoch
+			&& cached?.statusKey === statusKey
+		) {
+			return cached.lines;
+		}
+
 		const groupedName = getGroupedToolName(this.tools);
 		const label = getToolGroupLabel(this.tools);
 		const names = groupedName ? "" : formatToolNameList(this.tools);
@@ -707,7 +743,11 @@ class ToolGroupComponent extends Container {
 			lines.push(...formatBranchedToolLines(rawLines, index, this.tools.length, safeWidth, getToolStatusForGroup(tool)));
 		});
 
-		return lines.map((line) => clampLineWidth(line, safeWidth));
+		const rendered = lines.map((line) => clampLineWidth(line, safeWidth));
+		if (!hasPendingTool) {
+			this.renderCache = { width: safeWidth, expanded: this.expanded, branchKey, branchEpoch: _toolBranchVisualEpoch, statusKey, lines: rendered };
+		}
+		return rendered;
 	}
 }
 
@@ -911,6 +951,10 @@ function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: str
 function clearToolRenderCache(value: unknown): void {
 	if (!value || typeof value !== "object") return;
 	delete (value as any)[TOOL_RENDER_CACHE];
+	const parent = (value as any)[COMPONENT_PARENT];
+	if (parent && typeof parent.clearRenderCache === "function") {
+		try { parent.clearRenderCache(); } catch { /* noop */ }
+	}
 }
 
 function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
@@ -2686,18 +2730,32 @@ function collapsedPreviewCount(expanded: boolean, fallback: number): number {
 }
 
 function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fallbackCollapsed = 8): string {
-	if (lines.length === 0) return theme.fg("muted", "(no output)");
-	const maxLines = collapsedPreviewCount(expanded, fallbackCollapsed);
-	const shown = lines.slice(0, maxLines);
-	let text = shown.join("\n");
-	const remaining = lines.length - shown.length;
+	return buildPreviewTextMapped(lines, expanded, theme, fallbackCollapsed, (line) => line);
+}
+
+function previewTruncationSuffix(totalLines: number, shownLines: number, expanded: boolean, theme: Theme, maxLines: number): string {
+	const remaining = totalLines - shownLines;
+	let text = "";
 	if (remaining > 0) {
 		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
-	if (expanded && lines.length > maxLines) {
+	if (expanded && totalLines > maxLines) {
 		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines)`)}`;
 	}
 	return text;
+}
+
+function buildPreviewTextMapped(
+	lines: string[],
+	expanded: boolean,
+	theme: Theme,
+	fallbackCollapsed = 8,
+	mapLine: (line: string) => string,
+): string {
+	if (lines.length === 0) return theme.fg("muted", "(no output)");
+	const maxLines = collapsedPreviewCount(expanded, fallbackCollapsed);
+	const shown = lines.slice(0, maxLines).map(mapLine);
+	return shown.join("\n") + previewTruncationSuffix(lines.length, shown.length, expanded, theme, maxLines);
 }
 
 // ===========================================================================
@@ -4726,7 +4784,7 @@ function runningPreviewBlock(
 
 	const styleLine = options.styleLine ?? ((line: string) => theme.fg("dim", line || " "));
 	const previewLines = options.tail && !expanded ? lines.slice(-limit) : lines;
-	let preview = buildPreviewText(previewLines.map(styleLine), expanded, theme, limit);
+	let preview = buildPreviewTextMapped(previewLines, expanded, theme, limit, styleLine);
 	if (options.tail && !expanded && lines.length > previewLines.length) {
 		preview = `${theme.fg("muted", `... (${lines.length - previewLines.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
 	}
@@ -5233,7 +5291,7 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
 	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
 	if (!expanded) return makeText(ctx.lastComponent, withBranch(`${statusText}${toolOutputDetailHint(theme, expanded)}`, theme));
-	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " ")), true, theme, previewLimit());
+	const preview = buildPreviewTextMapped(lines, true, theme, previewLimit(), (line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " "));
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
 
@@ -5390,7 +5448,7 @@ function formatOpenAiSuccessLine(name: string, line: string, theme: Theme): stri
 function renderTaskListResult(lines: string[], expanded: boolean, theme: Theme, ctx: any): Text {
 	const tasks = lines.map(parseTaskListLine).filter((task): task is ParsedTaskListLine => task !== null);
 	if (tasks.length === 0) {
-		const text = lines.length === 0 ? theme.fg("muted", "no tasks") : buildPreviewText(lines.map((line) => theme.fg("dim", line)), expanded, theme, previewLimit());
+		const text = lines.length === 0 ? theme.fg("muted", "no tasks") : buildPreviewTextMapped(lines, expanded, theme, previewLimit(), (line) => theme.fg("dim", line));
 		return makeText(ctx.lastComponent, withBranch(text, theme));
 	}
 
@@ -5490,7 +5548,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 
 	const preview = lines.length === 1
 		? theme.fg(ctx.isError ? "error" : "dim", lines[0])
-		: buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "dim", line || " ")), true, theme, previewLimit());
+		: buildPreviewTextMapped(lines, true, theme, previewLimit(), (line) => theme.fg(ctx.isError ? "error" : "dim", line || " "));
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
 
@@ -6028,7 +6086,7 @@ export default function (pi: ExtensionAPI) {
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
 			if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
-			text += `\n${buildPreviewText(nonEmpty.map((line) => theme.fg("dim", line)), true, theme, collapsed)}`;
+			text += `\n${buildPreviewTextMapped(nonEmpty, true, theme, collapsed, (line) => theme.fg("dim", line))}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});
@@ -6073,8 +6131,14 @@ export default function (pi: ExtensionAPI) {
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			if (rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
 			const previewLines = grouped.header ? matches.filter((line) => line !== grouped.header) : matches;
-			const formattedPreview = rtkCompaction ? formatGroupedGrepPreview(previewLines, ctx.args, theme) : previewLines.map((line) => theme.fg("dim", line));
-			text += `\n${buildPreviewText(formattedPreview, expanded, theme, previewLimit())}`;
+			if (rtkCompaction) {
+				const maxPreviewLines = collapsedPreviewCount(expanded, previewLimit());
+				const shownPreviewLines = previewLines.slice(0, maxPreviewLines);
+				const formattedPreview = formatGroupedGrepPreview(shownPreviewLines, ctx.args, theme);
+				text += `\n${formattedPreview.join("\n")}${previewTruncationSuffix(previewLines.length, shownPreviewLines.length, expanded, theme, maxPreviewLines)}`;
+			} else {
+				text += `\n${buildPreviewTextMapped(previewLines, expanded, theme, previewLimit(), (line) => theme.fg("dim", line))}`;
+			}
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});
