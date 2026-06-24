@@ -2042,6 +2042,17 @@ function hasOwnArg(args: any, key: string): boolean {
 	return !!args && Object.prototype.hasOwnProperty.call(args, key);
 }
 
+function firstNonEmptyString(...values: unknown[]): string {
+	for (const value of values) {
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return "";
+}
+
+function toolPathArg(args: any): string {
+	return firstNonEmptyString(args?.path, args?.file_path);
+}
+
 function fileExistsForTool(cwd: string, filePath: string): boolean {
 	if (!filePath) return false;
 	try {
@@ -2978,9 +2989,10 @@ const MAX_RENDER_LINES = 150;
 const MAX_HL_CHARS = 32_000;
 const STREAM_EDIT_DIFF_MAX_LINES = 300;
 const STREAM_EDIT_DIFF_MAX_CHARS = 30_000;
-const STREAM_EDIT_DIFF_STABLE_MS = 750;
+const ASYNC_DIFF_TIMEOUT_MS = 5_000;
 const CACHE_LIMIT = 48;
 const WORD_DIFF_MIN_SIM = 0.15;
+const WORD_DIFF_MAX_PAIR_CHARS = 1_000;
 const MAX_WRAP_ROWS_WIDE = 3;
 const MAX_WRAP_ROWS_MED = 2;
 const MAX_WRAP_ROWS_NARROW = 1;
@@ -3895,6 +3907,10 @@ function getCachedParsedDiff(ctx: any, key: string, oldContent: string, newConte
 	return diff;
 }
 
+function shouldUseWordDiff(oldText: string, newText: string): boolean {
+	return oldText.length + newText.length <= WORD_DIFF_MAX_PAIR_CHARS;
+}
+
 function wordDiffAnalysis(
 	oldText: string,
 	newText: string,
@@ -4047,7 +4063,8 @@ async function renderUnified(
 		}
 
 		const isPaired = dels.length === 1 && adds.length === 1;
-		const wd = isPaired ? wordDiffAnalysis(dels[0].l.content, adds[0].l.content) : null;
+		const canWordDiff = isPaired && shouldUseWordDiff(dels[0].l.content, adds[0].l.content);
+		const wd = canWordDiff ? wordDiffAnalysis(dels[0].l.content, adds[0].l.content) : null;
 		if (isPaired && wd && wd.similarity >= WORD_DIFF_MIN_SIM && canHL) {
 			emitRow(dels[0].l.oldNum, "-", BG_GUTTER_DEL, `${dc.fgDel}${D_BOLD}`, injectBg(dels[0].hl, wd.oldRanges, BG_DEL, BG_DEL_W), BG_DEL);
 			emitRow(adds[0].l.newNum, "+", BG_GUTTER_ADD, `${dc.fgAdd}${D_BOLD}`, injectBg(adds[0].hl, wd.newRanges, BG_ADD, BG_ADD_W), BG_ADD);
@@ -4166,7 +4183,8 @@ async function renderSplit(
 		const leftLine = row.left;
 		const rightLine = row.right;
 		const paired = Boolean(leftLine && rightLine && leftLine.type === "del" && rightLine.type === "add");
-		const wd = paired && leftLine && rightLine ? wordDiffAnalysis(leftLine.content, rightLine.content) : null;
+		const canWordDiff = paired && leftLine && rightLine && shouldUseWordDiff(leftLine.content, rightLine.content);
+		const wd = canWordDiff && leftLine && rightLine ? wordDiffAnalysis(leftLine.content, rightLine.content) : null;
 		let leftResult: HalfResult;
 		let rightResult: HalfResult;
 		if (paired && wd && leftLine && rightLine && wd.similarity >= WORD_DIFF_MIN_SIM && canHL) {
@@ -4311,65 +4329,15 @@ function isLargeStreamingDiffSize(size: { lines: number; chars: number }): boole
 	return size.lines > STREAM_EDIT_DIFF_MAX_LINES || size.chars > STREAM_EDIT_DIFF_MAX_CHARS;
 }
 
-function shouldDeferLargeEditDiff(ctx: any, parseKey: string, operations: Array<{ oldText: string; newText: string }>): boolean {
+function shouldDeferLargeEditDiff(ctx: any, _parseKey: string, operations: Array<{ oldText: string; newText: string }>): boolean {
 	const size = editOperationSize(operations);
 	if (!isLargeStreamingDiffSize(size)) return false;
-	if (ctx?.argsComplete === true || ctx?.executionStarted === true) return false;
-	return !(ctx?.state?._editStableParseKey === parseKey && ctx.state._editStableReady === true);
+	return !(ctx?.argsComplete === true || ctx?.executionStarted === true);
 }
 
-function shouldDeferLargeWriteDiff(ctx: any, parseKey: string, oldText: string, newText: string): boolean {
+function shouldDeferLargeWriteDiff(ctx: any, _parseKey: string, oldText: string, newText: string): boolean {
 	if (!isLargeStreamingDiffSize(textDiffSize(oldText, newText))) return false;
-	if (ctx?.argsComplete === true || ctx?.executionStarted === true) return false;
-	return !(ctx?.state?._writeStableParseKey === parseKey && ctx.state._writeStableReady === true);
-}
-
-function scheduleLargeEditStableDiff(ctx: any, parseKey: string): void {
-	const state = ctx?.state;
-	if (!state) return;
-	if (state._editStableParseKey === parseKey && state._editStableTimer) return;
-	if (state._editStableTimer) clearTimeout(state._editStableTimer);
-	state._editStableParseKey = parseKey;
-	state._editStableReady = false;
-	const timer = setTimeout(() => {
-		if (state._editStableParseKey !== parseKey) return;
-		state._editStableReady = true;
-		delete state._editStableTimer;
-		safeInvalidate(ctx);
-	}, STREAM_EDIT_DIFF_STABLE_MS);
-	state._editStableTimer = timer;
-	unrefTimer(timer);
-}
-
-function clearLargeEditStableDiff(state: any, parseKey: string): void {
-	if (!state || state._editStableParseKey !== parseKey) return;
-	if (state._editStableTimer) clearTimeout(state._editStableTimer);
-	delete state._editStableTimer;
-	delete state._editStableReady;
-}
-
-function scheduleLargeWriteStableDiff(ctx: any, parseKey: string): void {
-	const state = ctx?.state;
-	if (!state) return;
-	if (state._writeStableParseKey === parseKey && state._writeStableTimer) return;
-	if (state._writeStableTimer) clearTimeout(state._writeStableTimer);
-	state._writeStableParseKey = parseKey;
-	state._writeStableReady = false;
-	const timer = setTimeout(() => {
-		if (state._writeStableParseKey !== parseKey) return;
-		state._writeStableReady = true;
-		delete state._writeStableTimer;
-		safeInvalidate(ctx);
-	}, STREAM_EDIT_DIFF_STABLE_MS);
-	state._writeStableTimer = timer;
-	unrefTimer(timer);
-}
-
-function clearLargeWriteStableDiff(state: any, parseKey: string): void {
-	if (!state || state._writeStableParseKey !== parseKey) return;
-	if (state._writeStableTimer) clearTimeout(state._writeStableTimer);
-	delete state._writeStableTimer;
-	delete state._writeStableReady;
+	return !(ctx?.argsComplete === true || ctx?.executionStarted === true);
 }
 
 function offsetParsedDiff(diff: ParsedDiff, oldOffset: number, newOffset = oldOffset): ParsedDiff {
@@ -4411,6 +4379,201 @@ function getFirstChangedNewLine(diff: ParsedDiff): number {
 interface LocalizedEditDiff {
 	diff: ParsedDiff;
 	line: number;
+}
+
+interface WriteDiffData {
+	kind: "write-diff";
+	key: string;
+	diff: ParsedDiff;
+	hunks: number;
+	added: number;
+	removed: number;
+}
+
+interface EditDiffData {
+	kind: "edit-diff";
+	key: string;
+	diffs: ParsedDiff[];
+	totalAdded: number;
+	totalRemoved: number;
+	totalLines: number;
+	totalHunks: number;
+	localizedDiffs: LocalizedEditDiff[] | null;
+	lines: number[];
+}
+
+type AsyncDiffData = WriteDiffData | EditDiffData;
+
+type AsyncDiffJob =
+	| { kind: "write-diff"; key: string; channel?: string; oldText: string; newText: string }
+	| { kind: "edit-diff"; key: string; channel?: string; filePath: string; cwd: string; operations: Array<{ oldText: string; newText: string }> };
+
+interface PendingAsyncDiffJob {
+	channel: string;
+	job: AsyncDiffJob;
+	order: number;
+}
+
+class AsyncDiffService {
+	private order = 0;
+	private active = false;
+	private pumpTimer: ReturnType<typeof setTimeout> | null = null;
+	private pendingByChannel = new Map<string, PendingAsyncDiffJob>();
+	private latestKeyByChannel = new Map<string, string>();
+	private cache = new Map<string, AsyncDiffData>();
+	private errors = new Map<string, string>();
+	private listeners = new Map<string, Set<(data: AsyncDiffData) => void>>();
+
+	get<T extends AsyncDiffData>(key: string): T | undefined {
+		const hit = this.cache.get(key);
+		if (!hit) return undefined;
+		this.cache.delete(key);
+		this.cache.set(key, hit);
+		this.errors.delete(key);
+		return hit as T;
+	}
+
+	getError(key: string): string | undefined {
+		return this.errors.get(key);
+	}
+
+	requestLatest(job: AsyncDiffJob, options: { channel: string; onComplete?: () => void }): boolean {
+		if (this.get(job.key)) return true;
+		if (options.onComplete) this.addListener(job.key, () => options.onComplete?.());
+		const channel = options.channel;
+		const previousLatest = this.latestKeyByChannel.get(channel);
+		if (previousLatest && previousLatest !== job.key) this.clearListeners(previousLatest);
+		this.errors.delete(job.key);
+		this.latestKeyByChannel.set(channel, job.key);
+		this.pendingByChannel.set(channel, {
+			channel,
+			job: { ...job, channel } as AsyncDiffJob,
+			order: ++this.order,
+		});
+		this.schedulePump();
+		return true;
+	}
+
+	compute<T extends AsyncDiffData>(job: AsyncDiffJob, channel: string, timeoutMs = ASYNC_DIFF_TIMEOUT_MS + 1_000): Promise<T> {
+		const cached = this.get<T>(job.key);
+		if (cached) return Promise.resolve(cached);
+		return new Promise((resolvePromise, rejectPromise) => {
+			let settled = false;
+			const cleanup = this.addListener(job.key, (data) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				cleanup();
+				resolvePromise(data as T);
+			});
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				rejectPromise(new Error("diff compute timed out"));
+			}, timeoutMs);
+			unrefTimer(timer);
+			this.requestLatest(job, { channel });
+		});
+	}
+
+	dispose(): void {
+		if (this.pumpTimer) clearTimeout(this.pumpTimer);
+		this.pumpTimer = null;
+		this.pendingByChannel.clear();
+		this.latestKeyByChannel.clear();
+		this.errors.clear();
+		this.listeners.clear();
+		this.active = false;
+	}
+
+	private addListener(key: string, listener: (data: AsyncDiffData) => void): () => void {
+		let set = this.listeners.get(key);
+		if (!set) {
+			set = new Set();
+			this.listeners.set(key, set);
+		}
+		set.add(listener);
+		return () => {
+			const current = this.listeners.get(key);
+			if (!current) return;
+			current.delete(listener);
+			if (current.size === 0) this.listeners.delete(key);
+		};
+	}
+
+	private clearListeners(key: string): void {
+		this.listeners.delete(key);
+	}
+
+	private notify(key: string, data: AsyncDiffData): void {
+		const listeners = this.listeners.get(key);
+		this.listeners.delete(key);
+		if (!listeners) return;
+		for (const listener of listeners) {
+			try { listener(data); } catch {}
+		}
+	}
+
+	private setCache(key: string, data: AsyncDiffData): void {
+		this.cache.delete(key);
+		this.cache.set(key, data);
+		while (this.cache.size > CACHE_LIMIT) {
+			const first = this.cache.keys().next().value;
+			if (first === undefined) break;
+			this.cache.delete(first);
+		}
+	}
+
+	private schedulePump(): void {
+		if (this.active || this.pumpTimer || this.pendingByChannel.size === 0) return;
+		this.pumpTimer = setTimeout(() => {
+			this.pumpTimer = null;
+			void this.pump();
+		}, 0);
+		unrefTimer(this.pumpTimer);
+	}
+
+	private async pump(): Promise<void> {
+		if (this.active || this.pendingByChannel.size === 0) return;
+		const pending = Array.from(this.pendingByChannel.values()).sort((a, b) => b.order - a.order)[0];
+		this.pendingByChannel.delete(pending.channel);
+		this.active = true;
+		try {
+			const data = await this.computeJob(pending.job);
+			const isLatest = this.latestKeyByChannel.get(pending.channel) === pending.job.key;
+			if (isLatest) {
+				this.errors.delete(pending.job.key);
+				this.setCache(pending.job.key, data);
+				this.notify(pending.job.key, data);
+			} else {
+				this.clearListeners(pending.job.key);
+			}
+		} catch (error) {
+			const isLatest = this.latestKeyByChannel.get(pending.channel) === pending.job.key;
+			if (isLatest) this.errors.set(pending.job.key, error instanceof Error ? error.message : String(error));
+			this.clearListeners(pending.job.key);
+		} finally {
+			this.active = false;
+			this.schedulePump();
+		}
+	}
+
+	private async computeJob(job: AsyncDiffJob): Promise<AsyncDiffData> {
+		if (job.kind === "write-diff") {
+			const diff = parseDiff(job.oldText ?? "", job.newText ?? "");
+			return { kind: "write-diff", key: job.key, diff, hunks: countDiffHunks(diff), added: diff.added, removed: diff.removed };
+		}
+		const summary = summarizeEditOperations(job.operations);
+		const localizedDiffs = await computeLocalizedEditDiffs(job.filePath, job.operations, job.cwd);
+		return {
+			kind: "edit-diff",
+			key: job.key,
+			...summary,
+			localizedDiffs,
+			lines: (localizedDiffs ?? summary.diffs.map((diff) => ({ diff, line: getFirstChangedNewLine(diff) }))).map((entry) => entry.line),
+		};
+	}
 }
 
 async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string): Promise<LocalizedEditDiff[] | null> {
@@ -5568,6 +5731,8 @@ export default function (pi: ExtensionAPI) {
 	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
+	const asyncDiff = new AsyncDiffService();
+	pi.on("session_shutdown", () => asyncDiff.dispose());
 
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
@@ -6246,7 +6411,8 @@ export default function (pi: ExtensionAPI) {
 		description: writeTool.description,
 		parameters: writeTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
-			const fp = params.path ?? (params as any).file_path ?? "";
+			const fp = toolPathArg(params);
+			const writeParams = fp && params.path !== fp ? { ...(params as any), path: fp } : params;
 			const fullPath = fp ? resolve(cwd, fp) : "";
 			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
 			WRITE_EXISTED_BEFORE.set(toolCallId, existedBefore);
@@ -6257,11 +6423,21 @@ export default function (pi: ExtensionAPI) {
 				old = null;
 			}
 			WRITE_OLD_CONTENT.set(toolCallId, old);
-			const result = await writeTool.execute(toolCallId, params, signal, onUpdate);
-			const content = params.content ?? "";
+			const result = await writeTool.execute(toolCallId, writeParams, signal, onUpdate);
+			const content = writeParams.content ?? "";
 			if (old !== null && old !== content) {
-				const diff = parseDiff(old, content);
-				(result as any).details = { _type: "diff", summary: summarizeDiff(diff.added, diff.removed), diff, language: lang(fp) };
+				try {
+					const oldHash = hashText(old);
+					const contentHash = hashText(content);
+					const diffData = await asyncDiff.compute<WriteDiffData>(
+						{ kind: "write-diff", key: `write-execute:${fp}:${oldHash}:${contentHash}`, oldText: old, newText: content },
+						`write-execute:${toolCallId}`,
+					);
+					const diff = diffData.diff;
+					(result as any).details = { _type: "diff", summary: summarizeDiff(diff.added, diff.removed), diff, language: lang(fp) };
+				} catch {
+					// Async diff path: leave core result untouched if diff computation is unavailable.
+				}
 			} else if (old === null) {
 				(result as any).details = { _type: "new", lines: lineCount(content), filePath: fp };
 			} else if (old === content) {
@@ -6270,18 +6446,20 @@ export default function (pi: ExtensionAPI) {
 			return result;
 		},
 		renderCall(args, theme, ctx) {
-			const fp = args?.path ?? (args as any)?.file_path ?? "";
+			const fp = toolPathArg(args);
 			const content = typeof args?.content === "string" ? args.content : undefined;
-			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "content"));
+			const revealSummary = shouldRevealCallArgs(ctx) || content !== undefined;
 			syncToolCallStatus(ctx);
 			const wasNew = getWriteWasNewFile(ctx, cwd, fp, revealSummary);
 			const label = wasNew === true ? "Create" : "Write";
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				const base = sp(fp);
-				return shouldRevealCallArgs(ctx) ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
+				if (content === undefined) return base;
+				const count = theme.fg("muted", `(${lineCount(content)} lines)`);
+				return base ? `${base} ${count}` : count;
 			}, revealSummary);
 			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme));
-			if (!fp || content === undefined) return makeText(ctx.lastComponent, hdr);
+			if (content === undefined) return makeText(ctx.lastComponent, hdr);
 
 			let oldContent: string | null | undefined;
 			const toolCallId = typeof ctx?.toolCallId === "string" ? ctx.toolCallId : undefined;
@@ -6311,16 +6489,37 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (shouldDeferLargeWriteDiff(ctx, parseKey, previousContent ?? "", content)) {
-				if (ctx.state) ctx.state._writePreviewKey = key;
-				scheduleLargeWriteStableDiff(ctx, parseKey);
 				const body = ctx.state?._writePreviewDisplay as string | undefined;
 				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 			}
-			if (ctx?.argsComplete === true || ctx?.executionStarted === true) clearLargeWriteStableDiff(ctx.state, parseKey);
+			const diffResult = asyncDiff.get<WriteDiffData>(parseKey);
+			let diff: ParsedDiff;
+			let hunks: number;
+			if (diffResult) {
+				diff = diffResult.diff;
+				hunks = diffResult.hunks;
+			} else {
+				if (ctx.state) ctx.state._writePreviewKey = key;
+				const diffError = asyncDiff.getError(parseKey);
+				if (diffError) {
+					const body = ctx.state?._writePreviewDisplay as string | undefined;
+					const err = indentBranchBlock(withBranch(theme.fg("warning", `diff preview: ${diffError}`), theme, false, true));
+					return makeText(ctx.lastComponent, body ? `${hdr}\n${body}\n${err}` : `${hdr}\n${err}`);
+				}
+				asyncDiff.requestLatest(
+					{ kind: "write-diff", key: parseKey, oldText: previousContent ?? "", newText: content },
+					{
+						channel: `write:${toolCallId ?? (fp || parseKey)}`,
+						onComplete: () => {
+							if (ctx.state?._writePreviewActiveKey === key || ctx.state?._writePreviewKey === key) safeInvalidate(ctx);
+						},
+					},
+				);
+				const body = ctx.state?._writePreviewDisplay as string | undefined;
+				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			}
 
-			const diff = getCachedParsedDiff(ctx, `write-call-diff:${parseKey}`, previousContent ?? "", content);
 			const isNew = previousContent === null;
-			const hunks = countDiffHunks(diff);
 			const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 			const mode = isNew ? "new file" : shouldUseSplit(diff, diffWidth, previewLines) ? "split" : "unified";
 			const richSummary = diffSummaryWithMeta(diff.added, diff.removed, hunks, mode);
@@ -6440,12 +6639,28 @@ export default function (pi: ExtensionAPI) {
 		description: editTool.description,
 		parameters: editTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
-			const fp = params.path ?? (params as any).file_path ?? "";
-			const operations = getEditOperations(params);
-			const localizedDiffs = operations.length === 1 ? await computeLocalizedEditDiffs(fp, operations, cwd) : null;
-			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
-			if (operations.length === 0) return result;
-			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
+			const fp = toolPathArg(params);
+			const editParams = fp && params.path !== fp ? { ...(params as any), path: fp } : params;
+			const operations = getEditOperations(editParams);
+			let editDiffData: EditDiffData | null = null;
+			if (operations.length > 0) {
+				try {
+					const editHash = hashText(operations.map((edit) => `${edit.oldText} ${edit.newText}`).join(""));
+					editDiffData = await asyncDiff.compute<EditDiffData>(
+						{ kind: "edit-diff", key: `edit-execute:${fp}:${editHash}`, filePath: fp, cwd, operations },
+						`edit-execute:${toolCallId}`,
+					);
+				} catch {
+					editDiffData = null;
+				}
+			}
+			const result = await editTool.execute(toolCallId, editParams, signal, onUpdate);
+			if (operations.length === 0 || !editDiffData) return result;
+			const diffs = editDiffData.diffs;
+			const summary = summarizeDiff(editDiffData.totalAdded, editDiffData.totalRemoved);
+			const totalLines = editDiffData.totalLines;
+			const totalHunks = editDiffData.totalHunks;
+			const localizedDiffs = editDiffData.localizedDiffs;
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
 			if (operations.length === 1) {
 				const localized = localizedDiffs?.[0];
@@ -6475,9 +6690,9 @@ export default function (pi: ExtensionAPI) {
 			return result;
 		},
 		renderCall(args, theme, ctx) {
-			const fp = args?.path ?? (args as any)?.file_path ?? "";
+			const fp = toolPathArg(args);
 			const operations = getEditOperations(args);
-			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "edits"));
+			const revealSummary = !!fp && (shouldRevealCallArgs(ctx) || hasOwnArg(args, "edits"));
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
@@ -6489,13 +6704,33 @@ export default function (pi: ExtensionAPI) {
 			const parseKey = `edit:${fp}:${editHash}`;
 			const renderKey = `${parseKey}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			if (shouldDeferLargeEditDiff(ctx, parseKey, operations)) {
-				if (ctx.state) ctx.state._pk = renderKey;
-				scheduleLargeEditStableDiff(ctx, parseKey);
 				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state?._ptDisplay as string | undefined);
 				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 			}
-			if (ctx?.argsComplete === true || ctx?.executionStarted === true) clearLargeEditStableDiff(ctx.state, parseKey);
-			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, parseKey, operations);
+			const diffResult = asyncDiff.get<EditDiffData>(parseKey);
+			if (!diffResult) {
+				if (ctx.state) ctx.state._pk = renderKey;
+				const diffError = asyncDiff.getError(parseKey);
+				if (diffError) {
+					const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state?._ptDisplay as string | undefined);
+					const err = indentBranchBlock(withBranch(theme.fg("warning", `diff preview: ${diffError}`), theme, false, true));
+					return makeText(ctx.lastComponent, body ? `${hdr}\n${body}\n${err}` : `${hdr}\n${err}`);
+				}
+				asyncDiff.requestLatest(
+					{ kind: "edit-diff", key: parseKey, filePath: fp, cwd, operations },
+					{
+						channel: `edit:${typeof ctx?.toolCallId === "string" ? ctx.toolCallId : fp}`,
+						onComplete: () => {
+							if (ctx.state?._pk === renderKey) safeInvalidate(ctx);
+						},
+					},
+				);
+				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state?._ptDisplay as string | undefined);
+				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			}
+			const fallbackDiffs = diffResult.diffs;
+			const editSummary = summarizeDiff(diffResult.totalAdded, diffResult.totalRemoved);
+			const localizedDiffs = diffResult.localizedDiffs;
 			if (ctx.state._pk !== renderKey) {
 				ctx.state._pk = renderKey;
 				// Keep existing diff visible while new async preview renders. Only show
@@ -6508,33 +6743,9 @@ export default function (pi: ExtensionAPI) {
 			if (ctx.state._ptDisplayKey !== renderKey && ctx.state._ptPendingKey !== renderKey) {
 				ctx.state._ptPendingKey = renderKey;
 				const lg = lang(fp);
-				const renderLocalizedPreview = (localizedDiffs: LocalizedEditDiff[] | null | undefined): void => {
-					const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
-					const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
-					renderEditPreviewBody(ctx, renderKey, theme, lg, operations, diffs, lines, editSummary);
-				};
-				const hasLocalizedCache = ctx.state?._editLocalizedKey === parseKey && Object.prototype.hasOwnProperty.call(ctx.state, "_editLocalizedDiffs");
-				if (hasLocalizedCache) {
-					renderLocalizedPreview(ctx.state._editLocalizedDiffs as LocalizedEditDiff[] | null);
-				} else {
-					void computeLocalizedEditDiffs(fp, operations, cwd)
-						.then((localizedDiffs) => {
-							if (ctx.state._pk !== renderKey) return;
-							try {
-								ctx.state._editLocalizedKey = parseKey;
-								ctx.state._editLocalizedDiffs = localizedDiffs ?? null;
-							} catch {}
-							renderLocalizedPreview(localizedDiffs);
-						})
-						.catch(() => {
-							if (ctx.state._pk !== renderKey) return;
-							try {
-								ctx.state._editLocalizedKey = parseKey;
-								ctx.state._editLocalizedDiffs = null;
-							} catch {}
-							renderLocalizedPreview(null);
-						});
-				}
+				const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
+				const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
+				renderEditPreviewBody(ctx, renderKey, theme, lg, operations, diffs, lines, editSummary);
 			}
 			const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
