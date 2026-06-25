@@ -28,14 +28,19 @@
     "url": "https://github.com/FammasMaz/pi-cc-tools/issues"
   },
   "files": [
-    "extensions/index.ts",
-    "extensions/spinner.ts",
+    "index.ts",
+    "spinner.ts",
+    "diff/**/*.ts",
+    "markdown/**/*.ts",
+    "render/**/*.ts",
+    "settings/**/*.ts",
+    "tools/**/*.ts",
     "config/config.example.json",
     "README.md",
     "CHANGELOG.md"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck index.ts spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",
     "bench:tools": "bun scripts/benchmark-tools.ts"
@@ -50,8 +55,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/index.ts",
-      "./extensions/spinner.ts"
+      "./index.ts",
+      "./spinner.ts"
     ]
   },
   "devDependencies": {}
