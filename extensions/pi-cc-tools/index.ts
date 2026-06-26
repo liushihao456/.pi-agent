@@ -549,6 +549,12 @@ function stripGroupedToolBodyIndent(line: string): { body: string; startsChildBr
 		return { body: `${currentToolBranchAnsi()}${childBranch[1]}${TRANSPARENT_RESET}${childBranch[2] ?? ""}`, startsChildBranch: true };
 	}
 
+	const gutterMatch = line.match(/^(?:\x1b\[[0-9;]*m|[ \t]|[\uE000\uE001])*(?:[\uE000\uE001])((?:\x1b\[[0-9;]*m|[ \t])*\d+.*)$/u);
+	if (gutterMatch?.[1]) {
+		const visibleGutter = stripAnsi(gutterMatch[1]);
+		if (/^\s*\d+\s*│/.test(visibleGutter)) return { body: `${NOWRAP_MARK}${gutterMatch[1]}`, startsChildBranch: false };
+	}
+
 	const leadingTokens = "(?:\\x1b\\[[0-9;]*m|[\\uE000\\uE001])*";
 	let current = line;
 	for (let i = 0; i < 2; i++) {
@@ -557,10 +563,45 @@ function stripGroupedToolBodyIndent(line: string): { body: string; startsChildBr
 	return { body: current, startsChildBranch: false };
 }
 
+function groupedLineNumberGutter(body: string): { lineNo: string; width: number } | undefined {
+	const visible = stripAnsi(body).replace(/^[\uE000\uE001]+/u, "");
+	const match = visible.match(/^\s*(\d+)\s*│/u);
+	return match?.[1] ? { lineNo: match[1], width: match[1].length } : undefined;
+}
+
+function normalizeGroupedLineNumberGutter(body: string, width: number): string {
+	const gutter = groupedLineNumberGutter(body);
+	if (!gutter) return body;
+	const targetPadding = " ".repeat(Math.max(0, width - gutter.lineNo.length));
+	let index = 0;
+	while (index < body.length) {
+		const code = body.charCodeAt(index);
+		if (code === 0xe000 || code === 0xe001) {
+			index++;
+			continue;
+		}
+		const ansi = body.slice(index).match(/^\x1b\[[0-9;]*m/);
+		if (ansi?.[0]) {
+			index += ansi[0].length;
+			continue;
+		}
+		break;
+	}
+	const prefixEnd = index;
+	while (index < body.length && (body[index] === " " || body[index] === "\t")) index++;
+	return `${body.slice(0, prefixEnd)}${targetPadding}${body.slice(index)}`;
+}
+
 function formatBranchedToolLines(lines: string[], index: number, total: number, width: number, status: ToolStatus): string[] {
 	const output: string[] = [];
 	const content = lines.filter((line) => isTerminalImageLine(line) || stripAnsi(line).trim().length > 0);
 	const safeContent = content.length > 0 ? content : [""];
+	const strippedLines = safeContent.map((line, lineIndex) => (
+		lineIndex === 0 || isTerminalImageLine(line)
+			? { body: line, startsChildBranch: false }
+			: stripGroupedToolBodyIndent(line)
+	));
+	const gutterWidth = Math.max(0, ...strippedLines.map((line) => groupedLineNumberGutter(line.body)?.width ?? 0));
 	const light = groupStatusLight(status);
 	let sawChildBranch = false;
 	for (let lineIndex = 0; lineIndex < safeContent.length; lineIndex++) {
@@ -570,9 +611,10 @@ function formatBranchedToolLines(lines: string[], index: number, total: number, 
 			continue;
 		}
 		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : branchContinuation(index, total);
-		const stripped = lineIndex === 0 ? { body: line, startsChildBranch: false } : stripGroupedToolBodyIndent(line);
+		const stripped = strippedLines[lineIndex] ?? { body: line, startsChildBranch: false };
+		const body = gutterWidth > 0 ? normalizeGroupedLineNumberGutter(stripped.body, gutterWidth) : stripped.body;
 		const childTextIndent = lineIndex > 0 && sawChildBranch && !stripped.startsChildBranch ? "   " : "";
-		output.push(clampLineWidth(`${prefix}${childTextIndent}${stripped.body}`, width));
+		output.push(clampLineWidth(`${prefix}${childTextIndent}${body}`, width));
 		if (stripped.startsChildBranch) sawChildBranch = true;
 	}
 	return output;
