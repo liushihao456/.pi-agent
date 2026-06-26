@@ -538,19 +538,42 @@ function branchContinuation(index: number, total: number, theme?: Theme): string
 	return index === total - 1 ? "    " : ` ${rule}│${TRANSPARENT_RESET}  `;
 }
 
+function stripGroupedToolBodyIndent(line: string): { body: string; startsChildBranch: boolean } {
+	// Child tools are rendered once as standalone tool rows. If a continuation
+	// line contains the child tool's own branch lead (└─/├─), strip every wrapper
+	// byte before that branch so it lands directly after the group continuation,
+	// aligned with the child status dot. Re-apply branch color because stripping
+	// wrappers can remove the ANSI span that originally colored └─/├─.
+	const childBranch = line.match(/^(?:\x1b\[[0-9;]*m|[\uE000\uE001]|[ \t])*([└├]─)(.*)$/u);
+	if (childBranch?.[1]) {
+		return { body: `${currentToolBranchAnsi()}${childBranch[1]}${TRANSPARENT_RESET}${childBranch[2] ?? ""}`, startsChildBranch: true };
+	}
+
+	const leadingTokens = "(?:\\x1b\\[[0-9;]*m|[\\uE000\\uE001])*";
+	let current = line;
+	for (let i = 0; i < 2; i++) {
+		current = current.replace(new RegExp(`^(${leadingTokens}) {1,4}`), "$1");
+	}
+	return { body: current, startsChildBranch: false };
+}
+
 function formatBranchedToolLines(lines: string[], index: number, total: number, width: number, status: ToolStatus): string[] {
 	const output: string[] = [];
 	const content = lines.filter((line) => isTerminalImageLine(line) || stripAnsi(line).trim().length > 0);
 	const safeContent = content.length > 0 ? content : [""];
 	const light = groupStatusLight(status);
+	let sawChildBranch = false;
 	for (let lineIndex = 0; lineIndex < safeContent.length; lineIndex++) {
 		const line = safeContent[lineIndex];
 		if (isTerminalImageLine(line)) {
 			output.push(line);
 			continue;
 		}
-		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : `${branchContinuation(index, total)}  `;
-		output.push(clampLineWidth(`${prefix}${line}`, width));
+		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : branchContinuation(index, total);
+		const stripped = lineIndex === 0 ? { body: line, startsChildBranch: false } : stripGroupedToolBodyIndent(line);
+		const childTextIndent = lineIndex > 0 && sawChildBranch && !stripped.startsChildBranch ? "   " : "";
+		output.push(clampLineWidth(`${prefix}${childTextIndent}${stripped.body}`, width));
+		if (stripped.startsChildBranch) sawChildBranch = true;
 	}
 	return output;
 }
