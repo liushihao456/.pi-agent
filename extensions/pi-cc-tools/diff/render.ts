@@ -333,7 +333,7 @@ export function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVI
 	if (tw < SPLIT_MIN_WIDTH) return false;
 	const nw = Math.max(2, String(Math.max(...diff.lines.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
 	const half = Math.floor((tw - 1) / 2);
-	const gw = nw + 5;
+	const gw = nw + 4;
 	const cw = Math.max(12, half - gw);
 	if (cw < SPLIT_MIN_CODE_WIDTH) return false;
 	const vis = diff.lines.slice(0, maxRows);
@@ -589,7 +589,7 @@ export async function renderUnified(
 	const vis = diff.lines.slice(0, max);
 	const tw = width;
 	const nw = Math.max(2, String(Math.max(...vis.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
-	const gw = nw + 5;
+	const gw = nw + 4;
 	const cw = Math.max(20, tw - gw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length <= MAX_RENDER_LINES;
 	const canUseWordDiff = shouldUseAggregateWordDiff(vis);
@@ -611,10 +611,9 @@ export async function renderUnified(
 
 	function emitRow(num: number | null, sign: string, gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
-		const border = borderFg ? `${borderFg}▌${D_RST}` : `${BG_BASE} `;
 		const numFg = borderFg || FG_LNUM;
-		const gutter = `${border}${gutterBg}${lnum(num, nw, numFg)}${signFg}${sign} ${D_RST}${DIVIDER} `;
-		const cont = `${border}${gutterBg}${" ".repeat(nw + 2)}${D_RST}${DIVIDER} `;
+		const gutter = `${BG_BASE}${lnum(num, nw, numFg)}${signFg}${sign} ${D_RST}${DIVIDER} `;
+		const cont = `${BG_BASE}${" ".repeat(nw + 2)}${D_RST}${DIVIDER} `;
 		const rows = wrapAnsi(tabs(body), cw, adaptiveWrapRows(), bodyBg);
 		out.push(`${gutter}${rows[0]}${D_RST}`);
 		for (let r = 1; r < rows.length; r++) out.push(`${cont}${rows[r]}${D_RST}`);
@@ -712,7 +711,7 @@ export async function renderSplit(
 	const half = Math.floor((tw - 1) / 2);
 	const maxVisibleLineNo = Math.max(...vis.flatMap((row) => [row.left?.oldNum ?? row.left?.newNum ?? 0, row.right?.oldNum ?? row.right?.newNum ?? 0]), 0);
 	const nw = Math.max(2, String(maxVisibleLineNo).length);
-	const gw = nw + 5;
+	const gw = nw + 4;
 	const cw = Math.max(12, half - gw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length * 2 <= MAX_RENDER_LINES * 2;
 	const canUseWordDiff = shouldUseAggregateWordDiff(vis.flatMap((row) => [row.left, row.right].filter((line): line is DiffLine => !!line)));
@@ -739,31 +738,29 @@ export async function renderSplit(
 	): HalfResult {
 		if (!line) {
 			const gPat = FG_STRIPE + "╱".repeat(nw + 2) + D_RST;
-			const gutter = ` ${gPat}${FG_RULE}│${D_RST} `;
+			const gutter = `${BG_BASE}${gPat}${FG_RULE}│${D_RST} `;
 			return { gutter, contGutter: gutter, bodyRows: [stripes(cw)] };
 		}
 		if (line.type === "sep") {
 			const gap = line.newNum;
 			const label = gap && gap > 0 ? `··· ${gap} lines ···` : "···";
-			const gutter = `${BG_BASE} ${FG_DIM}${fit("", nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
+			const gutter = `${BG_BASE}${FG_DIM}${fit("", nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
 			return { gutter, contGutter: gutter, bodyRows: [`${BG_BASE}${FG_DIM}${fit(label, cw)}${D_RST}`] };
 		}
 		const isDel = line.type === "del";
 		const isAdd = line.type === "add";
-		const gBg = isDel ? BG_GUTTER_DEL : isAdd ? BG_GUTTER_ADD : BG_BASE;
 		const cBg = isDel ? BG_DEL : isAdd ? BG_ADD : BG_BASE;
 		const sFg = isDel ? dc.fgDel : isAdd ? dc.fgAdd : dc.fgCtx;
 		const sign = isDel ? "-" : isAdd ? "+" : " ";
 		const num = isDel ? line.oldNum : isAdd ? line.newNum : side === "left" ? line.oldNum : line.newNum;
 		const borderFg = isDel ? dc.fgDel : isAdd ? dc.fgAdd : "";
-		const border = borderFg ? `${borderFg}▌${D_RST}` : ` ${BG_BASE}`;
 		const numFg = borderFg || FG_LNUM;
 		let body: string;
 		if (ranges && ranges.length > 0) body = injectBg(hl, ranges, cBg, isDel ? BG_DEL_W : BG_ADD_W);
 		else if (isDel || isAdd) body = `${cBg}${hl}`;
 		else body = `${BG_BASE}${D_DIM}${hl}`;
-		const gutter = `${border}${gBg}${lnum(num, nw, numFg)}${sFg}${D_BOLD}${sign} ${D_RST}${FG_RULE}│${D_RST} `;
-		const contGutter = `${border}${gBg}${" ".repeat(nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
+		const gutter = `${BG_BASE}${lnum(num, nw, numFg)}${sFg}${D_BOLD}${sign} ${D_RST}${FG_RULE}│${D_RST} `;
+		const contGutter = `${BG_BASE}${" ".repeat(nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
 		return { gutter, contGutter, bodyRows: wrapAnsi(tabs(body), cw, adaptiveWrapRows(), cBg) };
 	}
 
