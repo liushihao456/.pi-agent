@@ -3689,6 +3689,7 @@ export default function (pi: ExtensionAPI) {
 		stableCallSummary,
 		syncToolCallStatus,
 		toolHeader,
+		toolOutputDetailHint,
 		toolPathArg,
 		toolStatusDot,
 	});
