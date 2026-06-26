@@ -436,7 +436,7 @@ export class ThinkingParagraph {
 		const md = this.thinkingMarkdown();
 		// " ✻ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
-		const prefix = `${deps.WORKED_LINE_FG}✻${deps.deps.RESET}`;
+		const prefix = `${deps.WORKED_LINE_FG}✻${deps.RESET}`;
 		if (safeWidth <= PREFIX_W) {
 			this.cachedWidth = width;
 			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
