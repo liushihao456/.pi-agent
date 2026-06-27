@@ -309,10 +309,11 @@ export function diffSummaryWithMeta(added: number, removed: number, hunks: numbe
 	return extras.length ? `${base} ${FG_DIM}•${D_RST} ${extras.join(` ${FG_DIM}•${D_RST} `)}` : base;
 }
 
-function collapsedDiffHint(remainingLines: number, hiddenHunks: number): string {
+function collapsedDiffHint(remainingLines: number, hiddenHunks: number, expanded = false): string {
 	const width = termW();
+	const action = expanded ? "collapse" : "expand";
 	const candidates = [
-		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • ${keyHint("app.tools.expand", "to toggle")})`,
+		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • ${keyHint("app.tools.expand", `to ${action}`)})`,
 		`… (${remainingLines} more lines${hiddenHunks > 0 ? ` • ${hiddenHunks} hunks` : ""})`,
 		`… (+${remainingLines}${hiddenHunks > 0 ? ` • +${hiddenHunks}h` : ""})`,
 		"…",
@@ -584,6 +585,7 @@ export async function renderUnified(
 	max = MAX_RENDER_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 	width = termW(),
+	expanded = false,
 ): Promise<string> {
 	if (!diff.lines.length) return "";
 	const vis = diff.lines.slice(0, max);
@@ -673,7 +675,7 @@ export async function renderUnified(
 	}
 
 	out.push(diffRule(tw));
-	if (diff.lines.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(diff.lines.length - vis.length, 0)}${D_RST}`);
+	if (diff.lines.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(diff.lines.length - vis.length, 0, expanded)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -683,9 +685,10 @@ export async function renderSplit(
 	max = MAX_PREVIEW_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 	width = termW(),
+	expanded = false,
 ): Promise<string> {
 	const tw = width;
-	if (!shouldUseSplit(diff, tw, max)) return renderUnified(diff, language, max, dc, width);
+	if (!shouldUseSplit(diff, tw, max)) return renderUnified(diff, language, max, dc, width, expanded);
 	if (!diff.lines.length) return "";
 
 	type Row = { left: DiffLine | null; right: DiffLine | null };
@@ -812,7 +815,7 @@ export async function renderSplit(
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
-	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0)}${D_RST}`);
+	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0, expanded)}${D_RST}`);
 	return out.join("\n");
 
 }

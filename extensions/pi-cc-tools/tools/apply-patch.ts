@@ -326,7 +326,7 @@ export function renderApplyPatchCall(args: any, theme: any, ctx: any, sp: (path:
 		const dc = deps.resolveDiffColors(theme);
 		if (preview.changes.length === 1) {
 			const [change] = preview.changes;
-			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, diffWidth)
+			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, diffWidth, ctx.expanded)
 				.then((rendered) => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
@@ -343,7 +343,7 @@ export function renderApplyPatchCall(args: any, theme: any, ctx: any, sp: (path:
 			const maxShown = ctx.expanded ? preview.changes.length : Math.min(preview.changes.length, 3);
 			const previewLines = ctx.expanded ? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown))) : Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
 			Promise.all(preview.changes.slice(0, maxShown).map((change, index) =>
-				renderSplit(change.diff, change.language, previewLines, dc, diffWidth)
+				renderSplit(change.diff, change.language, previewLines, dc, diffWidth, ctx.expanded)
 					.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
 					.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
 			))

@@ -47,7 +47,7 @@ function renderEditPreviewBody(
 			displayKey: "_ptDisplayKey",
 			isCurrent: () => ctx.state?._pk === key,
 			yieldBeforeRender: true,
-			render: () => renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth)
+			render: () => renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth, ctx.expanded)
 				.catch(() => `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`),
 			commit: commitDisplay,
 		});
@@ -66,7 +66,7 @@ function renderEditPreviewBody(
 		render: () => Promise.all(
 			diffs.slice(0, maxShown).map((diff, index) => {
 				const line = lines[index] ?? getFirstChangedNewLine(diff);
-				return renderSplit(diff, language, previewLines, dc, branchWidth)
+				return renderSplit(diff, language, previewLines, dc, branchWidth, ctx.expanded)
 					.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
 					.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
 			}),
