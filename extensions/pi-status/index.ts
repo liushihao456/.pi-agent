@@ -57,8 +57,16 @@ type WorkingUiRoute = {
 	setWorkingIndicator?: (options?: WorkingIndicatorOptions) => void;
 };
 
+type PendingWorkingUi = {
+	messageSet?: boolean;
+	message?: string;
+	indicatorSet?: boolean;
+	indicator?: WorkingIndicatorOptions;
+};
+
 type WorkingUiRouter = {
 	routes: Map<string, WorkingUiRoute>;
+	pending: Map<string, PendingWorkingUi>;
 	register: (sessionId: string, route: WorkingUiRoute) => void;
 	unregister: (sessionId: string, route: WorkingUiRoute) => void;
 	setWorkingMessage: (sessionId: string | undefined, message?: string) => void;
@@ -70,6 +78,11 @@ type WorkingUiRouter = {
 
 function sessionKey(ctx: ExtensionContext): string | undefined {
 	const sessionManager = (ctx as any).sessionManager;
+	return sessionManager?.getSessionId?.() || sessionManager?.getSessionFile?.();
+}
+
+function modeSessionKey(mode: unknown): string | undefined {
+	const sessionManager = (mode as any)?.sessionManager;
 	return sessionManager?.getSessionId?.() || sessionManager?.getSessionFile?.();
 }
 
@@ -85,19 +98,42 @@ function getWorkingUiRouter(): WorkingUiRouter {
 	if (router) return router;
 	router = {
 		routes: new Map(),
+		pending: new Map(),
 		register(sessionId, route) {
 			this.routes.set(sessionId, route);
+			const pending = this.pending.get(sessionId);
+			if (pending?.messageSet) route.setWorkingMessage?.(pending.message);
+			if (pending?.indicatorSet) route.setWorkingIndicator?.(pending.indicator);
 		},
 		unregister(sessionId, route) {
 			if (this.routes.get(sessionId) === route) this.routes.delete(sessionId);
+			this.pending.delete(sessionId);
 		},
 		setWorkingMessage(sessionId, message) {
 			if (!sessionId) return;
-			this.routes.get(sessionId)?.setWorkingMessage?.(message);
+			const route = this.routes.get(sessionId);
+			if (route) {
+				route.setWorkingMessage?.(message);
+				return;
+			}
+			this.pending.set(sessionId, {
+				...(this.pending.get(sessionId) ?? {}),
+				messageSet: true,
+				message,
+			});
 		},
 		setWorkingIndicator(sessionId, options) {
 			if (!sessionId) return;
-			this.routes.get(sessionId)?.setWorkingIndicator?.(options);
+			const route = this.routes.get(sessionId);
+			if (route) {
+				route.setWorkingIndicator?.(options);
+				return;
+			}
+			this.pending.set(sessionId, {
+				...(this.pending.get(sessionId) ?? {}),
+				indicatorSet: true,
+				indicator: options,
+			});
 		},
 	};
 	g[WORKING_UI_ROUTER] = router;
@@ -151,12 +187,10 @@ export default function piStatus(pi: ExtensionAPI) {
 			.prototype;
 		if (!proto || proto[WORKING_UI_PATCHED]) return;
 
-		// Official extension UI calls are routed by installWorkingUiContextPatch(ctx),
-		// where sessionId is known. The prototype patch remains as a best-effort
-		// safety net for direct InteractiveMode calls and delegates to the original.
 		const originalSetWorkingMessage = proto.setWorkingMessage;
 		if (typeof originalSetWorkingMessage === "function") {
 			proto.setWorkingMessage = function (message?: string) {
+				getWorkingUiRouter().setWorkingMessage(modeSessionKey(this), message);
 				return originalSetWorkingMessage.call(this, message);
 			};
 		}
@@ -164,6 +198,7 @@ export default function piStatus(pi: ExtensionAPI) {
 		const originalSetWorkingIndicator = proto.setWorkingIndicator;
 		if (typeof originalSetWorkingIndicator === "function") {
 			proto.setWorkingIndicator = function (options?: WorkingIndicatorOptions) {
+				getWorkingUiRouter().setWorkingIndicator(modeSessionKey(this), options);
 				return originalSetWorkingIndicator.call(this, options);
 			};
 		}
