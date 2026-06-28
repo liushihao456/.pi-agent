@@ -45,15 +45,64 @@ import {
 } from "./state.ts";
 import type { PiStatusConfig } from "./types.ts";
 
-const WORKING_UI_PATCHED = Symbol.for("pi-status:interactive-mode-working-ui-patched");
-const WORKING_UI_CONTEXT_PATCHED = Symbol.for("pi-status:context-working-ui-patched");
-const WORKING_UI_HANDLER = Symbol.for("pi-status:working-ui-handler");
+const WORKING_UI_PATCHED = Symbol.for("pi-status:interactive-mode-working-ui-patched:v2");
+const WORKING_UI_CONTEXT_PATCHED = Symbol.for("pi-status:context-working-ui-patched:v2");
+const WORKING_UI_CONTEXT_SESSION_ID = Symbol.for("pi-status:context-session-id:v2");
+const WORKING_UI_ROUTER = Symbol.for("pi-status:working-ui-router:v2");
+const LEGACY_WORKING_UI_HANDLER = Symbol.for("pi-status:working-ui-handler");
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
-type WorkingUiHandler = {
+type WorkingUiRoute = {
 	setWorkingMessage?: (message?: string) => void;
 	setWorkingIndicator?: (options?: WorkingIndicatorOptions) => void;
 };
+
+type WorkingUiRouter = {
+	routes: Map<string, WorkingUiRoute>;
+	register: (sessionId: string, route: WorkingUiRoute) => void;
+	unregister: (sessionId: string, route: WorkingUiRoute) => void;
+	setWorkingMessage: (sessionId: string | undefined, message?: string) => void;
+	setWorkingIndicator: (
+		sessionId: string | undefined,
+		options?: WorkingIndicatorOptions,
+	) => void;
+};
+
+function sessionKey(ctx: ExtensionContext): string | undefined {
+	const sessionManager = (ctx as any).sessionManager;
+	return sessionManager?.getSessionId?.() || sessionManager?.getSessionFile?.();
+}
+
+function getWorkingUiRouter(): WorkingUiRouter {
+	const g = globalThis as typeof globalThis & Record<symbol, unknown>;
+	// If an older pi-status wrapper is already installed during /reload, keep its
+	// global single-slot handler inert so it cannot cross-route messages.
+	g[LEGACY_WORKING_UI_HANDLER] = {
+		setWorkingMessage: () => {},
+		setWorkingIndicator: () => {},
+	};
+	let router = g[WORKING_UI_ROUTER] as WorkingUiRouter | undefined;
+	if (router) return router;
+	router = {
+		routes: new Map(),
+		register(sessionId, route) {
+			this.routes.set(sessionId, route);
+		},
+		unregister(sessionId, route) {
+			if (this.routes.get(sessionId) === route) this.routes.delete(sessionId);
+		},
+		setWorkingMessage(sessionId, message) {
+			if (!sessionId) return;
+			this.routes.get(sessionId)?.setWorkingMessage?.(message);
+		},
+		setWorkingIndicator(sessionId, options) {
+			if (!sessionId) return;
+			this.routes.get(sessionId)?.setWorkingIndicator?.(options);
+		},
+	};
+	g[WORKING_UI_ROUTER] = router;
+	return router;
+}
 
 export default function piStatus(pi: ExtensionAPI) {
 	let config: PiStatusConfig = readPiStatusConfig();
@@ -70,30 +119,44 @@ export default function piStatus(pi: ExtensionAPI) {
 		requestWidgetRender?.();
 	}
 
-	function installWorkingUiPrototypePatch(): void {
-		const g = globalThis as typeof globalThis & Record<symbol, unknown>;
-		g[WORKING_UI_HANDLER] = {
-			setWorkingMessage: (message?: string) => {
-				state.workingMessage = message;
-				requestRender();
-			},
-			setWorkingIndicator: (options?: WorkingIndicatorOptions) => {
-				state.workingIndicatorFrames = options?.frames;
-				state.workingIndicatorIntervalMs = options?.intervalMs;
-				syncAnimation();
-				requestRender();
-			},
-		} satisfies WorkingUiHandler;
+	const workingUiRoute: WorkingUiRoute = {
+		setWorkingMessage: (message?: string) => {
+			state.workingMessage = message;
+			requestRender();
+		},
+		setWorkingIndicator: (options?: WorkingIndicatorOptions) => {
+			state.workingIndicatorFrames = options?.frames;
+			state.workingIndicatorIntervalMs = options?.intervalMs;
+			syncAnimation();
+			requestRender();
+		},
+	};
+	let registeredSessionId: string | undefined;
 
+	function registerWorkingUiRoute(ctx: ExtensionContext): string | undefined {
+		const id = sessionKey(ctx);
+		if (!id) return undefined;
+		const router = getWorkingUiRouter();
+		if (registeredSessionId && registeredSessionId !== id) {
+			router.unregister(registeredSessionId, workingUiRoute);
+		}
+		registeredSessionId = id;
+		router.register(id, workingUiRoute);
+		return id;
+	}
+
+	function installWorkingUiPrototypePatch(): void {
+		getWorkingUiRouter();
 		const proto = (InteractiveMode as unknown as { prototype?: Record<PropertyKey, unknown> })
 			.prototype;
 		if (!proto || proto[WORKING_UI_PATCHED]) return;
 
+		// Official extension UI calls are routed by installWorkingUiContextPatch(ctx),
+		// where sessionId is known. The prototype patch remains as a best-effort
+		// safety net for direct InteractiveMode calls and delegates to the original.
 		const originalSetWorkingMessage = proto.setWorkingMessage;
 		if (typeof originalSetWorkingMessage === "function") {
 			proto.setWorkingMessage = function (message?: string) {
-				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
-				handler?.setWorkingMessage?.(message);
 				return originalSetWorkingMessage.call(this, message);
 			};
 		}
@@ -101,8 +164,6 @@ export default function piStatus(pi: ExtensionAPI) {
 		const originalSetWorkingIndicator = proto.setWorkingIndicator;
 		if (typeof originalSetWorkingIndicator === "function") {
 			proto.setWorkingIndicator = function (options?: WorkingIndicatorOptions) {
-				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
-				handler?.setWorkingIndicator?.(options);
 				return originalSetWorkingIndicator.call(this, options);
 			};
 		}
@@ -112,15 +173,18 @@ export default function piStatus(pi: ExtensionAPI) {
 
 	function installWorkingUiContextPatch(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
+		const id = registerWorkingUiRoute(ctx);
 		const ui = ctx.ui as typeof ctx.ui & Record<symbol, unknown>;
+		ui[WORKING_UI_CONTEXT_SESSION_ID] = id;
 		if (ui[WORKING_UI_CONTEXT_PATCHED]) return;
 
-		const g = globalThis as typeof globalThis & Record<symbol, unknown>;
 		const originalSetWorkingMessage = ui.setWorkingMessage;
 		if (typeof originalSetWorkingMessage === "function") {
 			ui.setWorkingMessage = function (message?: string) {
-				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
-				handler?.setWorkingMessage?.(message);
+				getWorkingUiRouter().setWorkingMessage(
+					ui[WORKING_UI_CONTEXT_SESSION_ID] as string | undefined,
+					message,
+				);
 				return originalSetWorkingMessage.call(this, message);
 			};
 		}
@@ -128,8 +192,10 @@ export default function piStatus(pi: ExtensionAPI) {
 		const originalSetWorkingIndicator = ui.setWorkingIndicator;
 		if (typeof originalSetWorkingIndicator === "function") {
 			ui.setWorkingIndicator = function (options?: WorkingIndicatorOptions) {
-				const handler = g[WORKING_UI_HANDLER] as WorkingUiHandler | undefined;
-				handler?.setWorkingIndicator?.(options);
+				getWorkingUiRouter().setWorkingIndicator(
+					ui[WORKING_UI_CONTEXT_SESSION_ID] as string | undefined,
+					options,
+				);
 				return originalSetWorkingIndicator.call(this, options);
 			};
 		}
@@ -380,6 +446,10 @@ export default function piStatus(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		state.destroyed = true;
+		if (registeredSessionId) {
+			getWorkingUiRouter().unregister(registeredSessionId, workingUiRoute);
+			registeredSessionId = undefined;
+		}
 		clearSpinner();
 		clearGlow();
 		if (handles.projectTimer) clearInterval(handles.projectTimer);
