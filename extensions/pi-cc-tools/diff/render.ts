@@ -309,12 +309,13 @@ export function diffSummaryWithMeta(added: number, removed: number, hunks: numbe
 	return extras.length ? `${base} ${FG_DIM}•${D_RST} ${extras.join(` ${FG_DIM}•${D_RST} `)}` : base;
 }
 
-function collapsedDiffHint(remainingLines: number, hiddenHunks: number, expanded = false): string {
+function collapsedDiffHint(remainingLines: number, hiddenHunks: number, expanded = false, tail = false): string {
 	const width = termW();
 	const action = expanded ? "collapse" : "expand";
+	const direction = tail ? "earlier" : "more";
 	const candidates = [
-		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • ${keyHint("app.tools.expand", `to ${action}`)})`,
-		`… (${remainingLines} more lines${hiddenHunks > 0 ? ` • ${hiddenHunks} hunks` : ""})`,
+		`… (${remainingLines} ${direction} diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} ${direction} hunks` : ""} • ${keyHint("app.tools.expand", `to ${action}`)})`,
+		`… (${remainingLines} ${direction} lines${hiddenHunks > 0 ? ` • ${hiddenHunks} hunks` : ""})`,
 		`… (+${remainingLines}${hiddenHunks > 0 ? ` • +${hiddenHunks}h` : ""})`,
 		"…",
 	];
@@ -588,7 +589,8 @@ export async function renderUnified(
 	expanded = false,
 ): Promise<string> {
 	if (!diff.lines.length) return "";
-	const vis = diff.lines.slice(0, max);
+	const hiddenEarlier = Math.max(0, diff.lines.length - max);
+	const vis = diff.lines.slice(-max);
 	const tw = width;
 	const nw = Math.max(2, String(Math.max(...vis.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
 	const gw = nw + 4;
@@ -610,6 +612,7 @@ export async function renderUnified(
 	let newIndex = 0;
 	let index = 0;
 	const out: string[] = [diffRule(tw)];
+	if (hiddenEarlier > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenEarlier, 0, expanded, true)}${D_RST}`);
 
 	function emitRow(num: number | null, sign: string, gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
@@ -675,7 +678,6 @@ export async function renderUnified(
 	}
 
 	out.push(diffRule(tw));
-	if (diff.lines.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(diff.lines.length - vis.length, 0, expanded)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -694,7 +696,7 @@ export async function renderSplit(
 	type Row = { left: DiffLine | null; right: DiffLine | null };
 	const rows: Row[] = [];
 	let i = 0;
-	while (i < diff.lines.length && rows.length < max) {
+	while (i < diff.lines.length) {
 		const line = diff.lines[i];
 		if (line.type === "sep" || line.type === "ctx") {
 			rows.push({ left: line, right: line });
@@ -709,8 +711,8 @@ export async function renderSplit(
 		for (let j = 0; j < n; j++) rows.push({ left: dels[j] ?? null, right: adds[j] ?? null });
 	}
 
-	const vis = rows.slice(0, max);
-	const hiddenRows = Math.max(0, rows.length - vis.length) + (i < diff.lines.length ? Math.max(1, diff.lines.length - i) : 0);
+	const hiddenRows = Math.max(0, rows.length - max);
+	const vis = rows.slice(-max);
 	const half = Math.floor((tw - 1) / 2);
 	const maxVisibleLineNo = Math.max(...vis.flatMap((row) => [row.left?.oldNum ?? row.left?.newNum ?? 0, row.right?.oldNum ?? row.right?.newNum ?? 0]), 0);
 	const nw = Math.max(2, String(maxVisibleLineNo).length);
@@ -772,6 +774,7 @@ export async function renderSplit(
 	const hdrNew = `${BG_BASE}${" ".repeat(Math.max(0, nw - 2))}${dc.fgAdd}${D_DIM}new${D_RST}`;
 	out.push(`${BG_BASE}${hdrOld}${" ".repeat(Math.max(0, half - nw - 1))}${FG_RULE}┊${D_RST}${hdrNew}`);
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
+	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0, expanded, true)}${D_RST}`);
 
 	for (const row of vis) {
 		const leftLine = row.left;
@@ -815,7 +818,6 @@ export async function renderSplit(
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
-	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0, expanded)}${D_RST}`);
 	return out.join("\n");
 
 }

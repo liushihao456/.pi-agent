@@ -22,7 +22,9 @@ async function renderWrittenContentPreview(
 	toolOutputDetailHint: (theme: any, expanded: boolean, hasMore?: boolean) => string,
 ): Promise<string> {
 	const lines = content.split("\n");
-	const shown = lines.slice(0, maxLines);
+	const shown = lines.slice(-maxLines);
+	const firstShownLine = Math.max(0, lines.length - shown.length);
+	const hiddenEarlier = Math.max(0, lines.length - shown.length);
 	const nw = Math.max(3, String(Math.max(1, lineTotal, lines.length)).length);
 	let highlighted: string[] | null = null;
 	const language = lang(filePath);
@@ -35,14 +37,15 @@ async function renderWrittenContentPreview(
 		}
 	}
 	const body = [theme.fg("muted", `${lineTotal} lines written`)];
+	if (hiddenEarlier > 0) {
+		body.push(theme.fg("muted", `… ${hiddenEarlier} earlier lines${toolOutputDetailHint(theme, expanded, true)}`));
+	}
 	body.push(...shown.map((line, index) => {
-		const lineNo = String(index + 1).padStart(nw);
+		const lineNo = String(firstShownLine + index + 1).padStart(nw);
 		const rendered = highlighted?.[index] ?? theme.fg("dim", line || " ");
 		return `${NOWRAP_MARK}${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${rendered || " "}`;
 	}));
-	if (lines.length > shown.length) {
-		body.push(theme.fg("muted", `… ${lines.length - shown.length} more lines${toolOutputDetailHint(theme, expanded, true)}`));
-	} else if (expanded && lines.length > collapsedLines) {
+	if (hiddenEarlier === 0 && expanded && lines.length > collapsedLines) {
 		body.push(theme.fg("muted", `…${toolOutputDetailHint(theme, expanded, true)}`));
 	}
 	return body.join("\n");

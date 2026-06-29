@@ -18,11 +18,12 @@ export function buildPreviewText(lines: string[], expanded: boolean, theme: Them
 	return buildPreviewTextMapped(lines, expanded, theme, fallbackCollapsed, (line) => line);
 }
 
-export function previewTruncationSuffix(totalLines: number, shownLines: number, expanded: boolean, theme: Theme, maxLines: number): string {
+export function previewTruncationSuffix(totalLines: number, shownLines: number, expanded: boolean, theme: Theme, maxLines: number, tail = false): string {
 	const remaining = totalLines - shownLines;
 	let text = "";
 	if (remaining > 0) {
-		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
+		const label = tail ? "earlier lines" : "more lines";
+		text += `\n${theme.fg("muted", `... (${remaining} ${label}${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
 	if (expanded && totalLines > maxLines) {
 		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines)`)}`;
@@ -36,9 +37,12 @@ export function buildPreviewTextMapped(
 	theme: Theme,
 	fallbackCollapsed = 8,
 	mapLine: (line: string) => string,
+	options: { tail?: boolean } = {},
 ): string {
 	if (lines.length === 0) return theme.fg("muted", "(no output)");
 	const maxLines = collapsedPreviewCount(expanded, fallbackCollapsed);
-	const shown = lines.slice(0, maxLines).map(mapLine);
-	return shown.join("\n") + previewTruncationSuffix(lines.length, shown.length, expanded, theme, maxLines);
+	const shownRaw = options.tail ? lines.slice(-maxLines) : lines.slice(0, maxLines);
+	const shown = shownRaw.map(mapLine);
+	const suffix = previewTruncationSuffix(lines.length, shown.length, expanded, theme, maxLines, options.tail);
+	return options.tail && lines.length > shown.length ? `${suffix.slice(1)}\n${shown.join("\n")}` : shown.join("\n") + suffix;
 }
