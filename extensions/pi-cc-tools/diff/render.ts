@@ -612,7 +612,6 @@ export async function renderUnified(
 	let newIndex = 0;
 	let index = 0;
 	const out: string[] = [diffRule(tw)];
-	if (hiddenEarlier > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenEarlier, 0, expanded, true)}${D_RST}`);
 
 	function emitRow(num: number | null, sign: string, gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
@@ -678,6 +677,7 @@ export async function renderUnified(
 	}
 
 	out.push(diffRule(tw));
+	if (hiddenEarlier > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenEarlier, 0, expanded, true)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -774,7 +774,6 @@ export async function renderSplit(
 	const hdrNew = `${BG_BASE}${" ".repeat(Math.max(0, nw - 2))}${dc.fgAdd}${D_DIM}new${D_RST}`;
 	out.push(`${BG_BASE}${hdrOld}${" ".repeat(Math.max(0, half - nw - 1))}${FG_RULE}┊${D_RST}${hdrNew}`);
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
-	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0, expanded, true)}${D_RST}`);
 
 	for (const row of vis) {
 		const leftLine = row.left;
@@ -818,6 +817,7 @@ export async function renderSplit(
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
+	if (hiddenRows > 0) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(hiddenRows, 0, expanded, true)}${D_RST}`);
 	return out.join("\n");
 
 }

@@ -37,15 +37,14 @@ async function renderWrittenContentPreview(
 		}
 	}
 	const body = [theme.fg("muted", `${lineTotal} lines written`)];
-	if (hiddenEarlier > 0) {
-		body.push(theme.fg("muted", `… ${hiddenEarlier} earlier lines${toolOutputDetailHint(theme, expanded, true)}`));
-	}
 	body.push(...shown.map((line, index) => {
 		const lineNo = String(firstShownLine + index + 1).padStart(nw);
 		const rendered = highlighted?.[index] ?? theme.fg("dim", line || " ");
 		return `${NOWRAP_MARK}${theme.fg("muted", lineNo)} ${theme.fg("dim", "│")} ${rendered || " "}`;
 	}));
-	if (hiddenEarlier === 0 && expanded && lines.length > collapsedLines) {
+	if (hiddenEarlier > 0) {
+		body.push(theme.fg("muted", `… ${hiddenEarlier} earlier lines${toolOutputDetailHint(theme, expanded, true)}`));
+	} else if (expanded && lines.length > collapsedLines) {
 		body.push(theme.fg("muted", `…${toolOutputDetailHint(theme, expanded, true)}`));
 	}
 	return body.join("\n");
