@@ -2,14 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface SettingsFile {
 	toolBackground?: "default" | "transparent" | "outlines" | "border";
-	readOutputMode?: "hidden" | "summary" | "preview";
-	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
 	previewLines?: number;
 	expandedPreviewMaxLines?: number;
-	extraExpandedPreviewMaxLines?: number;
 	groupToolCalls?: boolean;
-	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
 	/** Show a small live output preview while tools are still running. Defaults to true. */
 	liveToolPreview?: boolean;

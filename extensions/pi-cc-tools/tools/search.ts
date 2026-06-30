@@ -1,8 +1,10 @@
-// @ts-nocheck
 import { createFindTool, createGrepTool, createLsTool } from "@earendil-works/pi-coding-agent";
 
 import { withBranch } from "../render/branch";
 import { buildPreviewTextMapped, previewTruncationSuffix } from "../render/preview";
+
+type ToolDetails = { truncation?: { truncated?: boolean } };
+type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 export function registerSearchTools(deps: any): void {
 	const {
@@ -19,10 +21,10 @@ pi.registerTool({
 	label: "grep",
 	description: grepTool.description,
 	parameters: grepTool.parameters,
-	async execute(toolCallId, params, signal, onUpdate) {
+	async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
 		return grepTool.execute(toolCallId, params, signal, onUpdate);
 	},
-	renderCall(args, theme, ctx) {
+	renderCall(args: any, theme: any, ctx: any) {
 		syncToolCallStatus(ctx);
 		const summary = stableCallSummary(ctx, "_callSummary", () => {
 			let value = `\"${summarizeText(args.pattern, 40)}\"`;
@@ -31,17 +33,17 @@ pi.registerTool({
 		});
 		return makeText(ctx.lastComponent, toolHeader("Grep", summary, theme, toolStatusDot(ctx, theme)));
 	},
-	renderResult(result, { expanded, isPartial }, theme, ctx) {
+	renderResult(result: any, { expanded, isPartial }: RenderOptions, theme: any, ctx: any) {
 		if (isPartial) {
 			return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Searching..."), expanded, theme, ctx));
 		}
 		clearBlinkTimer(ctx);
 		setToolStatus(ctx, ctx.isError ? "error" : "success");
-		const details = result.details as GrepToolDetails | undefined;
+		const details = result.details as ToolDetails | undefined;
 		const rtkCompaction = getRtkCompaction(details);
 		const matches = (result.content[0]?.type === "text" ? result.content[0].text : "")
 			.split("\n")
-			.filter((line) => line.trim().length > 0);
+			.filter((line: string) => line.trim().length > 0);
 		if (matches.length === 0) {
 			let text = theme.fg("muted", "no matches");
 			if (expanded && rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
@@ -52,14 +54,14 @@ pi.registerTool({
 		if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
 		if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 		if (rtkCompaction) text += `\n${formatRtkCompactionDetails(rtkCompaction, theme)}`;
-		const previewLines = grouped.header ? matches.filter((line) => line !== grouped.header) : matches;
+		const previewLines = grouped.header ? matches.filter((line: string) => line !== grouped.header) : matches;
 		if (rtkCompaction) {
 			const maxPreviewLines = collapsedPreviewCount(expanded, previewLimit());
 			const shownPreviewLines = previewLines.slice(0, maxPreviewLines);
 			const formattedPreview = formatGroupedGrepPreview(shownPreviewLines, ctx.args, theme);
 			text += `\n${formattedPreview.join("\n")}${previewTruncationSuffix(previewLines.length, shownPreviewLines.length, expanded, theme, maxPreviewLines)}`;
 		} else {
-			text += `\n${buildPreviewTextMapped(previewLines, expanded, theme, previewLimit(), (line) => theme.fg("dim", line))}`;
+			text += `\n${buildPreviewTextMapped(previewLines, expanded, theme, previewLimit(), (line: string) => theme.fg("dim", line))}`;
 		}
 		return makeText(ctx.lastComponent, withBranch(text, theme));
 	},
@@ -71,10 +73,10 @@ pi.registerTool({
 	label: "find",
 	description: findTool.description,
 	parameters: findTool.parameters,
-	async execute(toolCallId, params, signal, onUpdate) {
+	async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
 		return findTool.execute(toolCallId, params, signal, onUpdate);
 	},
-	renderCall(args, theme, ctx) {
+	renderCall(args: any, theme: any, ctx: any) {
 		syncToolCallStatus(ctx);
 		const summary = stableCallSummary(ctx, "_callSummary", () => {
 			let value = `\"${summarizeText(args.pattern, 40)}\"`;
@@ -83,7 +85,7 @@ pi.registerTool({
 		});
 		return makeText(ctx.lastComponent, toolHeader("Find", summary, theme, toolStatusDot(ctx, theme)));
 	},
-	renderResult(result, { expanded, isPartial }, theme, ctx) {
+	renderResult(result: any, { expanded, isPartial }: RenderOptions, theme: any, ctx: any) {
 		if (isPartial) {
 			return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Finding..."), expanded, theme, ctx));
 		}
@@ -91,7 +93,7 @@ pi.registerTool({
 		setToolStatus(ctx, ctx.isError ? "error" : "success");
 		const items = (result.content[0]?.type === "text" ? result.content[0].text : "")
 			.split("\n")
-			.filter((line) => line.trim().length > 0);
+			.filter((line: string) => line.trim().length > 0);
 		if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no files found"), theme));
 		let text = theme.fg("muted", `${items.length} files`);
 		if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
@@ -119,15 +121,15 @@ pi.registerTool({
 	label: "ls",
 	description: lsTool.description,
 	parameters: lsTool.parameters,
-	async execute(toolCallId, params, signal, onUpdate) {
+	async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
 		return lsTool.execute(toolCallId, params, signal, onUpdate);
 	},
-	renderCall(args, theme, ctx) {
+	renderCall(args: any, theme: any, ctx: any) {
 		syncToolCallStatus(ctx);
 		const summary = stableCallSummary(ctx, "_callSummary", () => sp(args.path ?? "."));
 		return makeText(ctx.lastComponent, toolHeader("List", summary, theme, toolStatusDot(ctx, theme)));
 	},
-	renderResult(result, { expanded, isPartial }, theme, ctx) {
+	renderResult(result: any, { expanded, isPartial }: RenderOptions, theme: any, ctx: any) {
 		if (isPartial) {
 			return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Listing..."), expanded, theme, ctx));
 		}
@@ -135,7 +137,7 @@ pi.registerTool({
 		setToolStatus(ctx, ctx.isError ? "error" : "success");
 		const items = (result.content[0]?.type === "text" ? result.content[0].text : "")
 			.split("\n")
-			.filter((line) => line.trim().length > 0);
+			.filter((line: string) => line.trim().length > 0);
 		if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "empty directory"), theme));
 		let text = theme.fg("muted", `${items.length} entries`);
 		if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));

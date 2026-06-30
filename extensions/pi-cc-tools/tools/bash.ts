@@ -1,8 +1,10 @@
-// @ts-nocheck
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 
 import { withBranch } from "../render/branch";
 import { buildPreviewTextMapped } from "../render/preview";
+
+type BashToolDetails = { truncation?: { truncated?: boolean } };
+type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 export function registerBashTool(deps: any): void {
 	const {
@@ -18,25 +20,25 @@ pi.registerTool({
 	label: "bash",
 	description: bashTool.description,
 	parameters: bashTool.parameters,
-	async execute(toolCallId, params, signal, onUpdate) {
+	async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
 		return bashTool.execute(toolCallId, params, signal, onUpdate);
 	},
-	renderCall(args, theme, ctx) {
+	renderCall(args: any, theme: any, ctx: any) {
 		syncToolCallStatus(ctx);
 		const rewrite = ensureRtkRewriteForContext(ctx, args);
 		const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
 		const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
 		return makeText(ctx.lastComponent, toolHeader("Bash", `${summary}${rtkBadge}`, theme, toolStatusDot(ctx, theme)));
 	},
-	renderResult(result, { expanded, isPartial }, theme, ctx) {
+	renderResult(result: any, { expanded, isPartial }: RenderOptions, theme: any, ctx: any) {
 		const details = result.details as BashToolDetails | undefined;
 		const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 		const output = result.content[0]?.type === "text" ? result.content[0].text : "";
-		const nonEmpty = output.split("\n").filter((line) => line.trim().length > 0);
+		const nonEmpty = output.split("\n").filter((line: string) => line.trim().length > 0);
 		if (isPartial) {
 			const running = runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
 				lines: nonEmpty,
-				styleLine: (line) => theme.fg("dim", line),
+				styleLine: (line: string) => theme.fg("dim", line),
 				tail: true,
 			});
 			const withRewrite = expanded && rewrite ? `${running}\n${withBranch(formatRtkRewriteDetails(rewrite, theme), theme)}` : running;
@@ -59,7 +61,7 @@ pi.registerTool({
 		if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 		const collapsed = bashCollapsedLimit();
 		if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
-		text += `\n${buildPreviewTextMapped(nonEmpty, true, theme, collapsed, (line) => theme.fg("dim", line))}`;
+		text += `\n${buildPreviewTextMapped(nonEmpty, true, theme, collapsed, (line: string) => theme.fg("dim", line))}`;
 		return makeText(ctx.lastComponent, withBranch(text, theme));
 	},
 });

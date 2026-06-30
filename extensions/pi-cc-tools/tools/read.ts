@@ -1,8 +1,10 @@
-// @ts-nocheck
 import { createReadTool } from "@earendil-works/pi-coding-agent";
 
 import { codeToAnsiLazy, detectLang, DIFF_THEME } from "../diff/render";
 import { withBranch } from "../render/branch";
+
+type ReadToolDetails = { truncation?: { truncated?: boolean } };
+type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 export function registerReadTool(deps: any): void {
 	const {
@@ -17,10 +19,10 @@ pi.registerTool({
 	label: "read",
 	description: readTool.description,
 	parameters: readTool.parameters,
-	async execute(toolCallId, params, signal, onUpdate) {
+	async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any) {
 		return readTool.execute(toolCallId, params, signal, onUpdate);
 	},
-	renderCall(args, theme, ctx) {
+	renderCall(args: any, theme: any, ctx: any) {
 		syncToolCallStatus(ctx);
 		if (args.path) {
 			try { ctx.state._readFilePath = String(args.path); } catch {}
@@ -40,7 +42,7 @@ pi.registerTool({
 		});
 		return makeText(ctx.lastComponent, toolHeader("Read", summary, theme, toolStatusDot(ctx, theme)));
 	},
-	renderResult(result, { expanded, isPartial }, theme, ctx) {
+	renderResult(result: any, { expanded, isPartial }: RenderOptions, theme: any, ctx: any) {
 		if (isPartial) {
 			return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Reading..."), expanded, theme, ctx));
 		}

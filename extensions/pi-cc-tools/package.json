@@ -42,8 +42,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck index.ts spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
-    "publish:dry-run": "npm publish --dry-run",
-    "bench:tools": "bun scripts/benchmark-tools.ts"
+    "publish:dry-run": "npm publish --dry-run"
   },
   "dependencies": {
     "@shikijs/cli": "^4.0.2",

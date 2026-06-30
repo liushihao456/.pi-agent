@@ -7,24 +7,22 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Compact built-in tool rendering** for `read`, `bash`, `grep`, `find`, `ls`, `edit`, and `write`
 - **Read previews with line-number gutters** (`line │ code`), async Shiki highlighting, offset-aware numbering, and single-line truncation for long lines
 - **Claude-style OpenAI tool rendering** for `apply_patch` plus common Pi/OpenAI-style tools like `webfetch`, `web_search`, `fetch_content`, task tools, and context tools
-- **`apply_patch` diff previews** that render parsed file patches in the call phase, similar to `edit`/`write`
-- **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
-- **Call-phase `edit` and `write` diff previews** that render asynchronously as soon as tool arguments are available; final results keep the concise success summary
+- **`apply_patch` diff previews** that render parsed file patches in the call phase, similar to `edit`
+- **Adaptive edit/apply_patch diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
+- **Call-phase `edit` diff previews** plus async `write` content previews; final rows keep concise completion summaries
 - **Diff stat bar** with colored add/remove summary and hunk metadata
 - **Progressive collapsed diff hints** that shorten on narrow terminals
 - **Thinking labels** during streaming and final messages, with context sanitization
 - **MCP-aware rendering** with hidden, summary, and preview modes
-- **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
 - **Tail-first bash output** for both running and expanded completed bash results, so the most recent lines stay visible
 - **Subagent completion notifications** restyled to match the same Claude-style tool rows
 - **RTK integration** for bash rewrites and grep compaction: bash rewrite notices fold into the bash row with a muted `(RTK)` badge, while RTK-compacted grep results show compacted line/character counts and read-style match gutters
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
-- **Light Ghostty-sync themes** — edit/write diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
-- **Transparent edit/write diffs** with universal red/green diff colors
+- **Light Ghostty-sync themes** — diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
+- **Transparent edit/apply_patch diffs** with universal red/green diff colors
 - **Grouped consecutive tool calls** with a compact status header and per-tool glance rows, preserving nested read/grep gutters and indentation (set `groupToolCalls: false` to disable)
-- **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
 - **Global border patch** for all tool rows, including unknown/custom tools
 
 ## Configuration
@@ -34,15 +32,10 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
 ```json
 {
   "toolBackground": "border",
-  "readOutputMode": "preview",
-  "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
-  "extraExpandedPreviewMaxLines": 12000,
-  "extraToolOutputExpanded": false,
   "groupToolCalls": true,
-  "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "liveToolPreview": true,
   "liveToolPreviewLines": 5,
@@ -109,27 +102,23 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 Use `/cc-tools` to control tool UI at runtime:
 
 ```text
-/cc-tools status          # show style, grouping, and extra-detail state
+/cc-tools status          # show style and grouping state
 /cc-tools outlines        # tool style: outlines, transparent, or default
 /cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
-/cc-tools detail toggle   # same mode as Ctrl+Shift+O
 ```
 
 ### Output modes
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `readOutputMode` | `hidden`, `summary`, `preview` | `preview` |
-| `searchOutputMode` | `hidden`, `count`, `preview` | `preview` |
 | `mcpOutputMode` | `hidden`, `summary`, `preview` | `preview` |
-| `bashOutputMode` | `opencode`, `summary`, `preview` | `opencode` |
 
 ### Output details
 
 - `read` preview rows use `line │ code`, preserve requested offsets, and update from plain text to Shiki-highlighted output asynchronously without blocking the UI.
 - Long `read` lines are truncated in-place with `…` instead of wrapping.
-- `edit`, `write`, and `apply_patch` render diff previews from the call arguments when available; `edit`/`write` final rows show only the concise completion summary to avoid duplicate diff stats.
+- `edit` and `apply_patch` render diff previews from the call arguments when available; `write` renders an async tail-oriented content preview.
 - Completed expanded `bash` output shows the tail of the command output, matching the running preview behavior.
 - RTK-compacted `grep` output is detected from `result.details.rtkCompaction` metadata. Expanded rows show `RTK compacted · lines: old → new · chars: old → new`, drop the duplicated grouped header, and render per-file matches as right-aligned `line │ code` rows with highlighted matches.
 
@@ -139,8 +128,6 @@ Use `/cc-tools` to control tool UI at runtime:
 |---------|---------|-------------|
 | `previewLines` | `8` | Lines shown in collapsed preview mode |
 | `expandedPreviewMaxLines` | `4000` | Max lines when expanded with Ctrl+O |
-| `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
-| `extraToolOutputExpanded` | `false` | Start with Ctrl+Shift+O extra-detail mode enabled |
 | `groupToolCalls` | `true` | Group adjacent/concurrent tool calls under a compact status header |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |

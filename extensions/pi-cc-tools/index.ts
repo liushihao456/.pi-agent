@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, extname, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import type {
 	ExtensionAPI,
@@ -15,7 +15,6 @@ import {
 	rawKeyHint,
 } from "@earendil-works/pi-coding-agent";
 import {
-	Box,
 	Container,
 	deleteAllKittyImages,
 	getCapabilities,
@@ -33,32 +32,25 @@ import type { BundledTheme } from "shiki";
 
 import { AsyncDiffService } from "./diff/async-service";
 import {
-	branchDiffWidth,
 	clearHighlightCache,
-	codeToAnsiLazy,
-	detectLang,
-	diffSummaryWithMeta,
-	lang,
-	renderSplit,
 	setDiffRenderPalette,
-	shouldUseSplit,
 	summarizeDiff,
 } from "./diff/render";
 import type { DiffColors } from "./diff/types";
 import { clampLineWidth, isBlankLine, padRenderedLineToWidth, padToWidth, stripAnsi } from "./render/ansi";
 import { configureBranchRenderer, indentBranchBlock, withBranch, withFinalBranchBlock } from "./render/branch";
-import { buildPreviewText, buildPreviewTextMapped, configurePreviewRenderer, previewTruncationSuffix } from "./render/preview";
+import { buildPreviewTextMapped, configurePreviewRenderer } from "./render/preview";
 import { configureMarkdownRenderer, DottedParagraph, makeMarkdownLinksCopySafe, ThinkingParagraph } from "./markdown/render";
 import { bustSpinnerSettingsCache, invalidateSettingsCache, readSettings, writeSettingsKey } from "./settings/config";
-import { bashCollapsedLimit, collapsedPreviewCount, diffCollapsedLimit, expandedPreviewLimit, liveToolPreviewEnabled, liveToolPreviewLimit, previewLimit } from "./settings/limits";
+import { bashCollapsedLimit, collapsedPreviewCount, diffCollapsedLimit, liveToolPreviewEnabled, liveToolPreviewLimit, previewLimit } from "./settings/limits";
 import { configureApplyPatchRenderer, renderApplyPatchCall, renderApplyPatchResult } from "./tools/apply-patch";
 import { registerBashTool } from "./tools/bash";
 import { registerEditTool } from "./tools/edit";
 import { registerReadTool } from "./tools/read";
 import { registerSearchTools } from "./tools/search";
 import { configureGenericToolRenderer, humanizeToolName, renderGenericToolCall, renderGenericToolResult, shouldUseGenericToolRenderer } from "./tools/generic";
-import { configureMcpToolRenderer, registerMcpToolOverrides } from "./tools/mcp";
-import { configureOpenAiToolRenderer, registerOpenAiToolOverrides, summarizeOpenAiToolCall } from "./tools/openai";
+import { configureMcpToolRenderer, isMcpToolName, registerMcpToolOverrides, renderMcpToolResult, summarizeMcpToolCall } from "./tools/mcp";
+import { configureOpenAiToolRenderer, registerOpenAiToolOverrides, renderOpenAiToolResult, summarizeOpenAiToolCall } from "./tools/openai";
 import { registerWriteTool } from "./tools/write";
 
 const RESET = "\x1b[0m";
@@ -901,17 +893,10 @@ function expandHint(_theme: Theme, action: "expand" | "collapse" | "toggle" = "t
 	return ` • ${configuredKeyHint("app.tools.expand", "ctrl+o", `to ${action}`)}`;
 }
 
-function toolOutputDetailHint(theme: Theme, expanded: boolean, hasMore = false): string {
+function toolOutputDetailHint(theme: Theme, expanded: boolean, _hasMore = false): string {
 	if (!expanded) return expandHint(theme, "expand");
 	const parts = [expandHint(theme, "collapse")];
 	return parts.join("");
-}
-
-function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: string[]): void {
-	if (!state) return;
-	for (const key of keys) {
-		delete state[key];
-	}
 }
 
 function clearToolRenderCache(value: unknown): void {
@@ -1243,7 +1228,7 @@ function stripOsc133Zones(line: string): string {
 }
 
 function stripBackgroundAnsi(text: string): string {
-	return text.replace(/\x1b\[([0-9;]*)m/g, (match, paramsText: string) => {
+	return text.replace(/\x1b\[([0-9;]*)m/g, (_match, paramsText: string) => {
 		const params = paramsText === "" ? ["0"] : paramsText.split(";");
 		const kept: string[] = [];
 		for (let i = 0; i < params.length; i++) {
@@ -1869,10 +1854,6 @@ function buildGrepRtkAliases(args: any): string[] {
 	].filter((value) => value.trim().length > 0))];
 }
 
-function buildGrepRtkPreview(args: any): string | undefined {
-	return buildGrepRtkAliases(args)[0];
-}
-
 function trackRtkOriginalToolPreview(toolName: unknown, toolCallId: unknown, args: unknown): void {
 	if (typeof toolCallId !== "string" || typeof toolName !== "string") return;
 	let preview: string | undefined;
@@ -1888,18 +1869,6 @@ function trackRtkOriginalToolPreview(toolName: unknown, toolCallId: unknown, arg
 		if (aliases.length > 0) RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.set(toolCallId, aliases);
 	}
 	if (preview) RTK_ORIGINAL_TOOL_PREVIEWS.set(toolCallId, preview);
-}
-
-function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
-	trackRtkOriginalToolPreview("bash", toolCallId, args);
-}
-
-function forgetRtkBashCommand(toolCallId: unknown): void {
-	if (typeof toolCallId !== "string") return;
-	RTK_ORIGINAL_BASH_COMMANDS.delete(toolCallId);
-	RTK_ORIGINAL_TOOL_PREVIEWS.delete(toolCallId);
-	RTK_ORIGINAL_TOOL_PREVIEW_ALIASES.delete(toolCallId);
-	RTK_REWRITES_BY_TOOL_ID.delete(toolCallId);
 }
 
 function clearRtkRewriteState(): void {
@@ -2018,7 +1987,7 @@ function clearBlinkTimer(ctx: any): void {
 	_scheduleGlobalBlinkTimer();
 }
 
-function pendingToolChromeColor(theme: Theme): "dim" | "muted" | "thinkingText" {
+function pendingToolChromeColor(_theme: Theme): "dim" | "muted" | "thinkingText" {
 	if (!themeAdaptiveEnabled()) return "muted";
 	return "dim";
 }
@@ -2402,30 +2371,7 @@ function themeAdaptiveEnabled(): boolean {
 let DIFF_THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
 /** True when the active pi theme has a light panel background (edit/write diff chrome). */
 let _diffOnLightBg = false;
-let codeToAnsiLoader: Promise<any> | null = null;
-
-const SPLIT_MIN_WIDTH = 150;
-const SPLIT_MIN_CODE_WIDTH = 60;
-const SPLIT_MAX_WRAP_RATIO = 0.2;
-const SPLIT_MAX_WRAP_LINES = 8;
-const MAX_TERM_WIDTH = 210;
-const DEFAULT_TERM_WIDTH = 200;
-const MAX_PREVIEW_LINES = 60;
-const MAX_RENDER_LINES = 150;
-const MAX_HL_CHARS = 32_000;
-const STREAM_EDIT_DIFF_MAX_LINES = 300;
-const STREAM_EDIT_DIFF_MAX_CHARS = 30_000;
-const ASYNC_DIFF_TIMEOUT_MS = 5_000;
-const CACHE_LIMIT = 48;
-const WORD_DIFF_MIN_SIM = 0.15;
-const WORD_DIFF_MAX_PAIR_CHARS = 1_000;
-const MAX_WRAP_ROWS_WIDE = 3;
-const MAX_WRAP_ROWS_MED = 2;
-const MAX_WRAP_ROWS_NARROW = 1;
-
 let D_RST = "\x1b[0m";
-const D_BOLD = "\x1b[1m";
-const D_DIM = "\x1b[2m";
 
 // Diff backgrounds — defaults are transparent; autoDeriveBgFromTheme fills them
 // using pi-tool-display's mix ratios against the theme's toolSuccessBg.
@@ -2553,21 +2499,6 @@ function applyToolBranchColor(theme?: any): void {
 	syncOutlineChromeFromBranch(theme);
 }
 
-/** Strip baked ├─ └─ │ prefixes so branch color can be reapplied. */
-function stripBranchMarkupLine(line: string): string {
-	let plain = stripAnsi(line);
-	plain = plain.replace(/^\s*[├└]─\s*/, "");
-	plain = plain.replace(/^\s*│\s{0,2}/, "");
-	return plain;
-}
-
-function stripBranchMarkupBlock(text: string): string {
-	return text
-		.split("\n")
-		.map((line) => (stripAnsi(line).trim() ? stripBranchMarkupLine(line) : line))
-		.join("\n");
-}
-
 function liveBranchDisplay(state: Record<string, unknown> | undefined, theme: Theme): string | undefined {
 	if (!state || typeof state !== "object") return undefined;
 	const body = state._ptBody;
@@ -2581,14 +2512,6 @@ function liveBranchDisplay(state: Record<string, unknown> | undefined, theme: Th
 		return display;
 	}
 	return undefined;
-}
-
-function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undefined, theme: Theme): void {
-	if (!state || typeof state !== "object") return;
-	const body = state._ptBody;
-	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
-		state._ptDisplay = indentBranchBlock(withBranch(body, theme, false, true));
-	}
 }
 
 function refreshAllToolBranchVisuals(ctx: any): void {
@@ -2647,17 +2570,6 @@ let DIVIDER = `${FG_RULE}│${D_RST}`;
 let DEFAULT_DIFF_COLORS: DiffColors = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
 let autoDerivePending = true;
 let hasExplicitBgConfig = false;
-
-function mixBg(
-	base: { r: number; g: number; b: number },
-	accent: { r: number; g: number; b: number },
-	intensity: number,
-): string {
-	const r = Math.round(base.r + (accent.r - base.r) * intensity);
-	const g = Math.round(base.g + (accent.g - base.g) * intensity);
-	const b = Math.round(base.b + (accent.b - base.b) * intensity);
-	return `\x1b[48;2;${r};${g};${b}m`;
-}
 
 // pi-tool-display tint targets for diff palette derivation
 const ADDITION_TINT_TARGET = { r: 84, g: 190, b: 118 };
@@ -3275,6 +3187,11 @@ export default function (pi: ExtensionAPI) {
 		toolStatusDot,
 	});
 	configureGenericToolRenderer({
+		isMcpToolName,
+		renderMcpToolResult,
+		summarizeMcpToolCall,
+		renderOpenAiToolResult,
+		summarizeOpenAiToolCall,
 		makeText,
 		shortPath,
 		stableCallSummary,
@@ -3369,7 +3286,7 @@ export default function (pi: ExtensionAPI) {
 					.filter((o) => o.startsWith(second))
 					.map((o) => ({ value: `branch ${o}`, label: o, description: "Branch connector color" }));
 			}
-			if (first === "group" || first === "detail" || first === "extra") {
+			if (first === "group") {
 				const second = parts[1] ?? "";
 				return TOOL_BOOL_MODES
 					.filter((m) => m.startsWith(second))

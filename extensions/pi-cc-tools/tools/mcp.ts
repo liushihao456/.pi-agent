@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { withBranch } from "../render/branch";
 import { buildPreviewTextMapped } from "../render/preview";
 

@@ -8,8 +8,6 @@ import type { BundledLanguage, BundledTheme } from "shiki";
 import type { DiffColors, DiffLine, ParsedDiff } from "./types";
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
-const TRANSPARENT_BG = "\x1b[49m";
-const TRANSPARENT_RESET = `\x1b[0m${TRANSPARENT_BG}`;
 
 const SPLIT_MIN_WIDTH = 150;
 const SPLIT_MIN_CODE_WIDTH = 60;
@@ -444,50 +442,6 @@ export async function hlBlock(code: string, language: BundledLanguage | undefine
 	}
 }
 
-function parseDiff(oldContent: string, newContent: string, ctxLines = 3): ParsedDiff {
-	const patch = Diff.structuredPatch("", "", oldContent, newContent, "", "", { context: ctxLines });
-	const lines: DiffLine[] = [];
-	let added = 0;
-	let removed = 0;
-	for (let hi = 0; hi < patch.hunks.length; hi++) {
-		if (hi > 0) {
-			const prev = patch.hunks[hi - 1];
-			const gap = patch.hunks[hi].oldStart - (prev.oldStart + prev.oldLines);
-			lines.push({ type: "sep", oldNum: null, newNum: gap > 0 ? gap : null, content: "" });
-		}
-		const hunk = patch.hunks[hi];
-		let oldLine = hunk.oldStart;
-		let newLine = hunk.newStart;
-		for (const raw of hunk.lines) {
-			if (raw === "\\ No newline at end of file") continue;
-			const ch = raw[0];
-			const text = raw.slice(1);
-			if (ch === "+") {
-				lines.push({ type: "add", oldNum: null, newNum: newLine++, content: text });
-				added++;
-			} else if (ch === "-") {
-				lines.push({ type: "del", oldNum: oldLine++, newNum: null, content: text });
-				removed++;
-			} else {
-				lines.push({ type: "ctx", oldNum: oldLine++, newNum: newLine++, content: text });
-			}
-		}
-	}
-	return { lines, added, removed, chars: oldContent.length + newContent.length };
-}
-
-function getCachedParsedDiff(ctx: any, key: string, oldContent: string, newContent: string): ParsedDiff {
-	if (ctx.state?._parsedDiffKey === key && ctx.state._parsedDiff) {
-		return ctx.state._parsedDiff as ParsedDiff;
-	}
-	const diff = parseDiff(oldContent, newContent);
-	if (ctx.state) {
-		ctx.state._parsedDiffKey = key;
-		ctx.state._parsedDiff = diff;
-	}
-	return diff;
-}
-
 function shouldUseWordDiff(oldText: string, newText: string): boolean {
 	return oldText.length + newText.length <= WORD_DIFF_MAX_PAIR_CHARS;
 }
@@ -613,7 +567,7 @@ export async function renderUnified(
 	let index = 0;
 	const out: string[] = [diffRule(tw)];
 
-	function emitRow(num: number | null, sign: string, gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
+	function emitRow(num: number | null, sign: string, _gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
 		const numFg = borderFg || FG_LNUM;
 		const gutter = `${BG_BASE}${lnum(num, nw, numFg)}${signFg}${sign} ${D_RST}${DIVIDER} `;

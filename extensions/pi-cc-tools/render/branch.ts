@@ -39,7 +39,7 @@ export function withBranch(content: string, theme: Theme, _isError = false, cont
 	return `${branchLead(first, continued, theme)}\n${rest.join("\n")}`;
 }
 
-export function withFinalBranchBlock(content: string, theme: Theme, isError = false): string {
+export function withFinalBranchBlock(content: string, theme: Theme, _isError = false): string {
 	if (!content || !content.trim()) return "";
 	const lines = content.split("\n");
 	const first = lines[0] ?? "";

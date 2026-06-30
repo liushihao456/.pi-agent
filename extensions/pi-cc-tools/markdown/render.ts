@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import { clampLineWidth, stripAnsi } from "../render/ansi";
@@ -354,21 +353,6 @@ export class DottedParagraph {
 	}
 }
 
-function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, message: any): void {
-	if (!container?.children) return;
-	const summary = hiddenThinkingSummaryForMessage(message);
-	for (let i = 0; i < container.children.length; i++) {
-		const child = container.children[i];
-		if (child instanceof HiddenThinkingSummary) {
-			child.setSummary(summary);
-			continue;
-		}
-		if (isHiddenThinkingPlaceholderText(child)) {
-			container.children[i] = new HiddenThinkingSummary(summary);
-		}
-	}
-}
-
 export class ThinkingParagraph {
 	private text: string;
 	private cachedWidth?: number;
@@ -450,7 +434,7 @@ export class ThinkingParagraph {
 				return ` ${prefix} ${line}`;
 			}
 			return `   ${line}`;
-		}).map((line) => clampLineWidth(line, safeWidth));
+		}).map((line: string) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
 		this.cachedLines = rendered;
 		this.chromeEpoch = deps.toolBranchVisualEpoch();

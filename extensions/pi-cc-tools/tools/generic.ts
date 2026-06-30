@@ -1,14 +1,4 @@
-// @ts-nocheck
-import { isMcpToolName, renderMcpToolResult, summarizeMcpToolCall } from "./mcp";
-import { renderOpenAiToolResult, summarizeOpenAiToolCall } from "./openai";
-
-let deps: any = {};
-
 export const CORE_TOOL_OVERRIDES = new Set(["read", "bash", "grep", "find", "ls", "write", "edit"]);
-
-export function configureGenericToolRenderer(nextDeps: any): void {
-	deps = nextDeps ?? {};
-}
 
 export function humanizeToolName(name: string): string {
 	return name
@@ -17,17 +7,37 @@ export function humanizeToolName(name: string): string {
 		.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+let deps: any = {};
+
+type GenericToolRendererDeps = {
+	isMcpToolName: (name: string) => boolean;
+	renderMcpToolResult: (result: any, expanded: boolean, isPartial: boolean, theme: any, ctx: any) => any;
+	summarizeMcpToolCall: (args: any, theme: any) => string;
+	renderOpenAiToolResult: (name: string, result: any, expanded: boolean, isPartial: boolean, theme: any, ctx: any) => any;
+	summarizeOpenAiToolCall: (name: string, args: any, theme: any, sp: (path: string) => string) => string;
+	makeText: (...args: any[]) => any;
+	shortPath: (cwd: string, path: string) => string;
+	stableCallSummary: (...args: any[]) => string;
+	syncToolCallStatus: (ctx: any) => void;
+	toolHeader: (...args: any[]) => string;
+	toolStatusDot: (ctx: any, theme: any) => string;
+};
+
+export function configureGenericToolRenderer(nextDeps: Partial<GenericToolRendererDeps>): void {
+	deps = nextDeps ?? {};
+}
+
 export function shouldUseGenericToolRenderer(name: unknown): boolean {
 	return typeof name === "string" && name.length > 0 && !CORE_TOOL_OVERRIDES.has(name);
 }
 
 function genericToolLabel(name: string): string {
-	return isMcpToolName(name) ? "MCP" : humanizeToolName(name);
+	return deps.isMcpToolName?.(name) ? "MCP" : humanizeToolName(name);
 }
 
 export function summarizeGenericToolCall(name: string, args: any, theme: any, sp: (path: string) => string): string {
-	if (isMcpToolName(name)) return summarizeMcpToolCall(args, theme);
-	return summarizeOpenAiToolCall(name, args, theme, sp);
+	if (deps.isMcpToolName?.(name)) return deps.summarizeMcpToolCall(args, theme);
+	return deps.summarizeOpenAiToolCall(name, args, theme, sp);
 }
 
 export function renderGenericToolCall(name: string, args: any, theme: any, ctx: any): any {
@@ -39,6 +49,6 @@ export function renderGenericToolCall(name: string, args: any, theme: any, ctx: 
 }
 
 export function renderGenericToolResult(name: string, result: any, options: any, theme: any, ctx: any): any {
-	if (isMcpToolName(name)) return renderMcpToolResult(result, !!options?.expanded, !!options?.isPartial, theme, ctx);
-	return renderOpenAiToolResult(name, { content: result.content, details: result.details }, !!options?.expanded, !!options?.isPartial, theme, ctx);
+	if (deps.isMcpToolName?.(name)) return deps.renderMcpToolResult(result, !!options?.expanded, !!options?.isPartial, theme, ctx);
+	return deps.renderOpenAiToolResult(name, { content: result.content, details: result.details }, !!options?.expanded, !!options?.isPartial, theme, ctx);
 }

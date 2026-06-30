@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -17,6 +16,7 @@ import {
 } from "../diff/render";
 import type { DiffLine, ParsedDiff } from "../diff/types";
 import { withBranch } from "../render/branch";
+import { scheduleKeyedAsyncPreviewRender } from "../render/scheduler";
 
 let deps: any = {};
 
@@ -279,28 +279,47 @@ function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: any): stri
 	return deps.formatLineMeta(change.line, theme);
 }
 
-function getCachedApplyPatchPreview(patchText: string, sp: (path: string) => string, ctx: any): ApplyPatchPreview | null {
-	if (!patchText) return null;
-	const key = `apply-meta:${ctx.cwd ?? process.cwd()}:${deps.hashText(patchText)}`;
-	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchPreview) return ctx.state._applyPatchPreview as ApplyPatchPreview;
-	try {
-		const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
-		if (ctx.state) {
-			ctx.state._applyPatchMetaKey = key;
-			ctx.state._applyPatchPreview = preview;
-			ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
-		}
-		return preview;
-	} catch {
-		return null;
-	}
+function getApplyPatchResultMeta(ctx: any): ApplyPatchResultMeta | null {
+	return ctx.state?._applyPatchMeta ? (ctx.state._applyPatchMeta as ApplyPatchResultMeta) : null;
 }
 
-function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => string): ApplyPatchResultMeta | null {
-	const patchText = deps.getStringArg(args ?? ctx?.args, "patchText", "patch_text");
+function applyPatchMetaKey(patchText: string, ctx: any): string {
+	return `apply-meta:${ctx.cwd ?? process.cwd()}:${deps.hashText(patchText)}`;
+}
+
+function getCachedApplyPatchPreviewOnly(patchText: string, ctx: any): ApplyPatchPreview | null {
 	if (!patchText) return null;
-	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
-	return preview && ctx.state?._applyPatchMeta ? (ctx.state._applyPatchMeta as ApplyPatchResultMeta) : null;
+	const key = applyPatchMetaKey(patchText, ctx);
+	return ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchPreview
+		? (ctx.state._applyPatchPreview as ApplyPatchPreview)
+		: null;
+}
+
+async function buildApplyPatchPreviewBody(preview: ApplyPatchPreview, theme: any, ctx: any, diffWidth: number): Promise<string> {
+	const dc = deps.resolveDiffColors(theme);
+	if (preview.changes.length === 1) {
+		const [change] = preview.changes;
+		try {
+			const rendered = await renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, diffWidth, ctx.expanded);
+			return `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
+		} catch {
+			return `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`;
+		}
+	}
+	const maxShown = ctx.expanded ? preview.changes.length : Math.min(preview.changes.length, 3);
+	const previewLines = ctx.expanded ? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown))) : Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
+	try {
+		const sections = await Promise.all(preview.changes.slice(0, maxShown).map((change, index) =>
+			renderSplit(change.diff, change.language, previewLines, dc, diffWidth, ctx.expanded)
+				.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
+				.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
+		));
+		const remainder = preview.changes.length - maxShown;
+		const suffix = remainder > 0 ? `\n${theme.fg("muted", `… ${remainder} more file patches${deps.toolOutputDetailHint(theme, ctx.expanded, true)}`)}` : "";
+		return `${preview.changes.length} files ${preview.summary}\n\n${sections.join("\n\n")}${suffix}`;
+	} catch {
+		return `${preview.changes.length} files ${preview.summary}`;
+	}
 }
 
 export function renderApplyPatchCall(args: any, theme: any, ctx: any, sp: (path: string) => string): any {
@@ -309,60 +328,55 @@ export function renderApplyPatchCall(args: any, theme: any, ctx: any, sp: (path:
 	const summary = deps.stableCallSummary(ctx, "_callSummary", () => deps.summarizeOpenAiToolCall("apply_patch", args, theme, sp));
 	const hdr = deps.toolHeader("Apply Patch", summary, theme, deps.toolStatusDot(ctx, theme));
 
-	if (!ctx.argsComplete) return deps.makeText(ctx.lastComponent, hdr);
-	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
-	if (!preview || preview.changes.length === 0) {
-		ctx.state._openAiPatchFiles = [];
-		return deps.makeText(ctx.lastComponent, hdr);
-	}
-	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
+	if (!ctx.argsComplete || !patchText) return deps.makeText(ctx.lastComponent, hdr);
 
 	const diffWidth = branchDiffWidth();
-	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? deps.hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+	const metaKey = applyPatchMetaKey(patchText, ctx);
+	const key = `apply-preview:${metaKey}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
 		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
 		ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-		const dc = deps.resolveDiffColors(theme);
-		if (preview.changes.length === 1) {
-			const [change] = preview.changes;
-			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, diffWidth, ctx.expanded)
-				.then((rendered) => {
-					if (ctx.state._applyPatchPreviewKey !== key) return;
-					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
-					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					deps.safeInvalidate(ctx);
-				})
-				.catch(() => {
-					if (ctx.state._applyPatchPreviewKey !== key) return;
-					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`;
-					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					deps.safeInvalidate(ctx);
-				});
-		} else {
-			const maxShown = ctx.expanded ? preview.changes.length : Math.min(preview.changes.length, 3);
-			const previewLines = ctx.expanded ? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown))) : Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
-			Promise.all(preview.changes.slice(0, maxShown).map((change, index) =>
-				renderSplit(change.diff, change.language, previewLines, dc, diffWidth, ctx.expanded)
-					.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
-					.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
-			))
-				.then((sections) => {
-					if (ctx.state._applyPatchPreviewKey !== key) return;
-					const remainder = preview.changes.length - maxShown;
-					const suffix = remainder > 0 ? `\n${theme.fg("muted", `… ${remainder} more file patches${deps.toolOutputDetailHint(theme, ctx.expanded, true)}`)}` : "";
-					const summary = `${preview.changes.length} files ${preview.summary}`;
-					ctx.state._applyPatchPreviewBody = `${summary}\n\n${sections.join("\n\n")}${suffix}`;
-					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					deps.safeInvalidate(ctx);
-				})
-				.catch(() => {
-					if (ctx.state._applyPatchPreviewKey !== key) return;
-					ctx.state._applyPatchPreviewBody = `${preview.changes.length} files ${preview.summary}`;
-					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					deps.safeInvalidate(ctx);
-				});
-		}
+		delete ctx.state._applyPatchPreviewDisplayKey;
+	}
+
+	const cached = getCachedApplyPatchPreviewOnly(patchText, ctx);
+	if (cached?.changes?.length) ctx.state._openAiPatchFiles = cached.changes.map((change) => change.displayPath);
+	else ctx.state._openAiPatchFiles = [];
+
+	if (ctx.state._applyPatchPreviewDisplayKey !== key && ctx.state._applyPatchPreviewPendingKey !== key) {
+		scheduleKeyedAsyncPreviewRender({
+			state: ctx.state,
+			key,
+			pendingKey: "_applyPatchPreviewPendingKey",
+			displayKey: "_applyPatchPreviewDisplayKey",
+			isCurrent: () => ctx.state?._applyPatchPreviewKey === key,
+			yieldBeforeRender: true,
+			render: async () => {
+				const preview = cached ?? parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
+				const body = preview.changes.length > 0 ? await buildApplyPatchPreviewBody(preview, theme, ctx, diffWidth) : "";
+				return { preview, body };
+			},
+			commit: ({ preview, body }) => {
+				if (ctx.state._applyPatchPreviewKey !== key) return;
+				ctx.state._applyPatchMetaKey = metaKey;
+				ctx.state._applyPatchPreview = preview;
+				ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
+				ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
+				ctx.state._applyPatchPreviewBody = body;
+				ctx.state._applyPatchPreviewDisplay = body ? withBranch(body, theme, false, true) : "";
+				ctx.state._applyPatchPreviewDisplayKey = key;
+				deps.safeInvalidate(ctx);
+			},
+			onError: () => {
+				if (ctx.state._applyPatchPreviewKey !== key) return;
+				ctx.state._openAiPatchFiles = [];
+				ctx.state._applyPatchPreviewBody = "";
+				ctx.state._applyPatchPreviewDisplay = "";
+				ctx.state._applyPatchPreviewDisplayKey = key;
+				deps.safeInvalidate(ctx);
+			},
+		});
 	}
 
 	const body = ctx.state._applyPatchPreviewDisplay as string | undefined;
@@ -380,7 +394,7 @@ export function renderApplyPatchResult(result: any, isPartial: boolean, theme: a
 		return deps.makeText(ctx.lastComponent, withBranch(theme.fg("error", firstLine), theme));
 	}
 
-	const meta = getApplyPatchResultMeta(ctx.args, ctx, (path: string) => deps.shortPath(ctx.cwd ?? process.cwd(), path));
+	const meta = getApplyPatchResultMeta(ctx);
 	if (!meta || meta.changeCount === 0) return deps.makeText(ctx.lastComponent, withBranch(theme.fg("success", "Applied"), theme));
 
 	if (meta.changeCount === 1 && meta.firstChange) {
